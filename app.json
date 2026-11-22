@@ -1,0 +1,34 @@
+{
+  "expo": {
+    "name": "Cinema",
+    "slug": "cinema",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "dark",
+    "splash": {
+      "image": "./assets/splash-icon.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#020617"
+    },
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.imon.cinema"
+    },
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/android-icon-foreground.png",
+        "backgroundColor": "#020617"
+      },
+      "package": "com.imon.cinema",
+      "permissions": [
+        "INTERNET",
+        "ACCESS_NETWORK_STATE"
+      ]
+    },
+    "extra": {
+      "defaultApiUrl": "http://192.168.100.13:8099",
+      "offlineFallback": true
+    }
+  }
+}
