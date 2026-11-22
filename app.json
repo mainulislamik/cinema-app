@@ -6,11 +6,6 @@
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "dark",
-    "splash": {
-      "image": "./assets/splash-icon.png",
-      "resizeMode": "contain",
-      "backgroundColor": "#020617"
-    },
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.imon.cinema"
@@ -21,7 +16,6 @@
         "backgroundColor": "#020617"
       },
       "package": "com.imon.cinema",
-      "usesCleartextTraffic": true,
       "permissions": [
         "INTERNET",
         "ACCESS_NETWORK_STATE"
@@ -34,6 +28,26 @@
         "projectId": "5edbe0f6-4161-4be1-9f14-05af771423f8"
       }
     },
-    "owner": "mainulislamik"
+    "owner": "mainulislamik",
+    "plugins": [
+      "expo-status-bar",
+      "expo-font",
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "usesCleartextTraffic": true
+          }
+        }
+      ],
+      [
+        "expo-splash-screen",
+        {
+          "image": "./assets/splash-icon.png",
+          "resizeMode": "contain",
+          "backgroundColor": "#020617"
+        }
+      ]
+    ]
   }
 }
