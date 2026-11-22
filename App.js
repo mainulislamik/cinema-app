@@ -18,10 +18,11 @@ import {
 import { WebView } from 'react-native-webview';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Feather } from '@expo/vector-icons';
+import * as ScreenOrientation from 'expo-screen-orientation';
 
 const STORAGE_KEY = '@cinema_server_url';
 const DEFAULT_SERVER_URL = 'http://169.40.116.114:8099';
-const CURRENT_APP_VERSION = '1.0.2';
+const CURRENT_APP_VERSION = '1.0.3';
 
 const isNewerVersion = (remoteVer, currentVer) => {
   if (!remoteVer || typeof remoteVer !== 'string') return false;
@@ -93,6 +94,7 @@ export default function App() {
 
   // Ensure app always points to DEFAULT_SERVER_URL and overwrite any stale cached URLs
   useEffect(() => {
+    ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP).catch(() => {});
     const initServerUrl = async () => {
       try {
         await AsyncStorage.setItem(STORAGE_KEY, DEFAULT_SERVER_URL);
@@ -172,6 +174,31 @@ export default function App() {
     }
   };
 
+  const handleWebViewMessage = useCallback((event) => {
+    try {
+      const data = event.nativeEvent.data;
+      if (!data) return;
+      const msg = typeof data === 'string' ? JSON.parse(data) : data;
+      if (msg && msg.type === 'SET_ORIENTATION') {
+        if (msg.orientation === 'landscape') {
+          ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.LANDSCAPE);
+        } else if (msg.orientation === 'portrait') {
+          ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP);
+        } else if (msg.orientation === 'unlock') {
+          ScreenOrientation.unlockAsync();
+        }
+      }
+    } catch (err) {
+      console.warn('WebView message error:', err);
+    }
+  }, []);
+
+  const handleContentProcessDidTerminate = useCallback(() => {
+    if (webViewRef.current) {
+      webViewRef.current.reload();
+    }
+  }, []);
+
   // Wait until storage initialization completes before mounting WebView
   if (!isStorageLoaded) {
     return (
@@ -213,6 +240,8 @@ export default function App() {
           originWhitelist={['*']}
           setSupportMultipleWindows={false}
           scalesPageToFit={true}
+          onMessage={handleWebViewMessage}
+          onContentProcessDidTerminate={handleContentProcessDidTerminate}
           onNavigationStateChange={(navState) => {
             setCanGoBack(navState.canGoBack);
           }}
