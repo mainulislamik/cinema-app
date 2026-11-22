@@ -14,6 +14,8 @@ import {
   KeyboardAvoidingView,
   ScrollView,
   RefreshControl,
+  Linking,
+  Alert,
 } from 'react-native';
 import { WebView } from 'react-native-webview';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -21,6 +23,26 @@ import { Feather } from '@expo/vector-icons';
 
 const STORAGE_KEY = '@cinema_server_url';
 const DEFAULT_SERVER_URL = 'http://192.168.100.13:8099';
+const CURRENT_APP_VERSION = '1.0.1';
+
+const isNewerVersion = (remoteVer, currentVer) => {
+  if (!remoteVer || typeof remoteVer !== 'string') return false;
+  const parse = (v) =>
+    v
+      .replace(/^v/i, '')
+      .split('.')
+      .map((n) => parseInt(n, 10) || 0);
+  const r = parse(remoteVer);
+  const c = parse(currentVer);
+  const len = Math.max(r.length, c.length);
+  for (let i = 0; i < len; i++) {
+    const rv = r[i] || 0;
+    const cv = c[i] || 0;
+    if (rv > cv) return true;
+    if (rv < cv) return false;
+  }
+  return false;
+};
 
 export default function App() {
   const [serverUrl, setServerUrl] = useState(DEFAULT_SERVER_URL);
@@ -34,9 +56,15 @@ export default function App() {
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [sessionKey, setSessionKey] = useState(0);
 
+  // Auto-update checker states
+  const [updateModalVisible, setUpdateModalVisible] = useState(false);
+  const [updateInfo, setUpdateInfo] = useState(null);
+  const [isCheckingUpdate, setIsCheckingUpdate] = useState(false);
+
   const webViewRef = useRef(null);
   const canGoBackRef = useRef(false);
   const isSettingsOpenRef = useRef(false);
+  const updateModalVisibleRef = useRef(false);
 
   useEffect(() => {
     canGoBackRef.current = canGoBack;
@@ -46,28 +74,84 @@ export default function App() {
     isSettingsOpenRef.current = isSettingsOpen;
   }, [isSettingsOpen]);
 
-  // Load configured server URL from storage on startup
+  useEffect(() => {
+    updateModalVisibleRef.current = updateModalVisible;
+  }, [updateModalVisible]);
+
+  const normalizeUrl = (raw) => {
+    let url = (raw || '').trim();
+    if (!url) return DEFAULT_SERVER_URL;
+    if (!/^https?:\/\//i.test(url)) {
+      url = 'http://' + url;
+    }
+    return url.replace(/\/+$/, '');
+  };
+
+  const checkForUpdates = useCallback(
+    async (targetUrl, manualTrigger = false) => {
+      const base = normalizeUrl(targetUrl || serverUrl);
+      setIsCheckingUpdate(true);
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 5000);
+
+      try {
+        const response = await fetch(`${base}/api/app/version`, {
+          signal: controller.signal,
+          headers: { Accept: 'application/json' },
+        });
+        clearTimeout(timeoutId);
+
+        if (!response.ok) {
+          throw new Error(`Server responded with status ${response.status}`);
+        }
+
+        const data = await response.json();
+        if (data && isNewerVersion(data.version, CURRENT_APP_VERSION)) {
+          setUpdateInfo(data);
+          setUpdateModalVisible(true);
+        } else if (manualTrigger) {
+          Alert.alert('Up to Date', `You are using the latest version (v${CURRENT_APP_VERSION}).`);
+        }
+      } catch (err) {
+        clearTimeout(timeoutId);
+        if (manualTrigger) {
+          Alert.alert('Check Failed', 'Could not reach update server.');
+        }
+      } finally {
+        setIsCheckingUpdate(false);
+      }
+    },
+    [serverUrl]
+  );
+
+  // Load configured server URL from storage on startup and check for updates
   useEffect(() => {
     const loadSavedUrl = async () => {
+      let initialUrl = DEFAULT_SERVER_URL;
       try {
         const stored = await AsyncStorage.getItem(STORAGE_KEY);
         if (stored && stored.trim().length > 0) {
-          const cleanUrl = stored.trim();
-          setServerUrl(cleanUrl);
-          setTempUrl(cleanUrl);
+          initialUrl = stored.trim();
+          setServerUrl(initialUrl);
+          setTempUrl(initialUrl);
         }
       } catch (err) {
         console.warn('Unable to access AsyncStorage:', err);
       } finally {
         setIsStorageLoaded(true);
+        checkForUpdates(initialUrl, false);
       }
     };
     loadSavedUrl();
-  }, []);
+  }, [checkForUpdates]);
 
   // Hardware back button support
   useEffect(() => {
     const onBackPress = () => {
+      if (updateModalVisibleRef.current) {
+        setUpdateModalVisible(false);
+        return true;
+      }
       if (isSettingsOpenRef.current) {
         setIsSettingsOpen(false);
         return true;
@@ -86,15 +170,6 @@ export default function App() {
 
     return () => backSubscription.remove();
   }, []);
-
-  const normalizeUrl = (raw) => {
-    let url = (raw || '').trim();
-    if (!url) return DEFAULT_SERVER_URL;
-    if (!/^https?:\/\//i.test(url)) {
-      url = 'http://' + url;
-    }
-    return url.replace(/\/+$/, '');
-  };
 
   const handleSaveUrl = async () => {
     const formatted = normalizeUrl(tempUrl);
@@ -130,6 +205,22 @@ export default function App() {
       setIsRefreshing(false);
     }, 1200);
   }, [handleRetry]);
+
+  const handleDownloadUpdate = async () => {
+    if (!updateInfo) return;
+    const downloadPath = updateInfo.download_url || '/downloads/cinema.apk';
+    let apkUrl = downloadPath;
+    if (!/^https?:\/\//i.test(downloadPath)) {
+      const base = serverUrl.replace(/\/+$/, '');
+      apkUrl = `${base}${downloadPath.startsWith('/') ? '' : '/'}${downloadPath}`;
+    }
+    try {
+      await Linking.openURL(apkUrl);
+    } catch (err) {
+      console.warn('Failed to open update URL:', err);
+      Alert.alert('Download Failed', 'Could not open APK download link.');
+    }
+  };
 
   const handleWebViewError = (syntheticEvent) => {
     const { nativeEvent } = syntheticEvent;
@@ -312,7 +403,7 @@ export default function App() {
         )}
       </View>
 
-      {/* Configure Server Address Modal */}
+      {/* Configure Server Address & Settings Modal */}
       <Modal
         visible={isSettingsOpen}
         animationType="fade"
@@ -334,6 +425,29 @@ export default function App() {
                 hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
               >
                 <Feather name="x" size={20} color="#94a3b8" />
+              </TouchableOpacity>
+            </View>
+
+            {/* Version Badge & Check Updates */}
+            <View style={styles.versionContainer}>
+              <View style={styles.versionBadge}>
+                <Feather name="smartphone" size={13} color="#94a3b8" style={{ marginRight: 6 }} />
+                <Text style={styles.versionBadgeText}>Cinema v{CURRENT_APP_VERSION}</Text>
+              </View>
+              <TouchableOpacity
+                style={styles.checkUpdateButton}
+                activeOpacity={0.8}
+                disabled={isCheckingUpdate}
+                onPress={() => checkForUpdates(serverUrl, true)}
+              >
+                {isCheckingUpdate ? (
+                  <ActivityIndicator size="small" color="#38bdf8" />
+                ) : (
+                  <>
+                    <Feather name="refresh-cw" size={12} color="#38bdf8" style={{ marginRight: 6 }} />
+                    <Text style={styles.checkUpdateButtonText}>Check for Updates</Text>
+                  </>
+                )}
               </TouchableOpacity>
             </View>
 
@@ -381,6 +495,69 @@ export default function App() {
           </View>
         </KeyboardAvoidingView>
       </Modal>
+
+      {/* In-App Update Modal */}
+      <Modal
+        visible={updateModalVisible}
+        animationType="fade"
+        transparent={true}
+        onRequestClose={() => setUpdateModalVisible(false)}
+      >
+        <View style={styles.modalBackdrop}>
+          <View style={styles.updateModalSheet}>
+            <View style={styles.updateModalHeader}>
+              <View style={styles.updateIconCircle}>
+                <Feather name="arrow-down-circle" size={24} color="#38bdf8" />
+              </View>
+              <TouchableOpacity
+                onPress={() => setUpdateModalVisible(false)}
+                hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+              >
+                <Feather name="x" size={20} color="#94a3b8" />
+              </TouchableOpacity>
+            </View>
+
+            <Text style={styles.updateTitle}>New Update Available</Text>
+
+            <View style={styles.updateVersionRow}>
+              <View style={styles.updateVersionBadge}>
+                <Text style={styles.updateVersionBadgeText}>
+                  v{updateInfo?.version || '1.0.1'}
+                </Text>
+              </View>
+              {updateInfo?.architecture ? (
+                <Text style={styles.updateArchText}>{updateInfo.architecture}</Text>
+              ) : null}
+            </View>
+
+            {updateInfo?.release_notes ? (
+              <View style={styles.notesContainer}>
+                <Text style={styles.notesHeading}>RELEASE NOTES</Text>
+                <Text style={styles.notesContent}>{updateInfo.release_notes}</Text>
+              </View>
+            ) : null}
+
+            <View style={styles.updateButtonStack}>
+              <TouchableOpacity
+                style={styles.updateLaterButton}
+                activeOpacity={0.8}
+                onPress={() => setUpdateModalVisible(false)}
+              >
+                <Text style={styles.updateLaterButtonText}>Later</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={styles.updateNowButton}
+                activeOpacity={0.85}
+                onPress={handleDownloadUpdate}
+              >
+                <Feather name="download" size={15} color="#090d16" style={{ marginRight: 6 }} />
+                <Text style={styles.updateNowButtonText}>Update Now</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -405,6 +582,10 @@ const styles = StyleSheet.create({
   splashScreen: {
     flex: 1,
     backgroundColor: '#090d16',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  brandingBox: {
     alignItems: 'center',
     justifyContent: 'center',
   },
@@ -621,7 +802,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    marginBottom: 20,
+    marginBottom: 16,
   },
   modalHeaderTitleRow: {
     flexDirection: 'row',
@@ -633,6 +814,46 @@ const styles = StyleSheet.create({
     fontSize: 17,
     fontWeight: '700',
   },
+
+  /* Version Badge & Check Updates */
+  versionContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: '#090d16',
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#1e293b',
+    marginBottom: 16,
+  },
+  versionBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  versionBadgeText: {
+    color: '#f8fafc',
+    fontSize: 12,
+    fontWeight: '600',
+    letterSpacing: 0.5,
+  },
+  checkUpdateButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#1e293b',
+    borderWidth: 1,
+    borderColor: '#334155',
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 6,
+  },
+  checkUpdateButtonText: {
+    color: '#38bdf8',
+    fontSize: 12,
+    fontWeight: '600',
+  },
+
   fieldLabel: {
     color: '#94a3b8',
     fontSize: 11,
@@ -655,7 +876,7 @@ const styles = StyleSheet.create({
   resetRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginBottom: 24,
+    marginBottom: 20,
     paddingVertical: 4,
   },
   resetRowText: {
@@ -693,4 +914,111 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: '700',
   },
+
+  /* In-App Update Modal */
+  updateModalSheet: {
+    width: '100%',
+    backgroundColor: '#0f172a',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#1e293b',
+    padding: 20,
+  },
+  updateModalHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 16,
+  },
+  updateIconCircle: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: '#1e293b',
+    borderWidth: 1,
+    borderColor: '#334155',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  updateTitle: {
+    color: '#f8fafc',
+    fontSize: 18,
+    fontWeight: '700',
+    marginBottom: 8,
+  },
+  updateVersionRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginBottom: 16,
+  },
+  updateVersionBadge: {
+    backgroundColor: '#1e293b',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 4,
+    borderWidth: 1,
+    borderColor: '#38bdf8',
+  },
+  updateVersionBadgeText: {
+    color: '#38bdf8',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  updateArchText: {
+    color: '#64748b',
+    fontSize: 11,
+  },
+  notesContainer: {
+    backgroundColor: '#090d16',
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#1e293b',
+    padding: 12,
+    marginBottom: 20,
+  },
+  notesHeading: {
+    color: '#64748b',
+    fontSize: 10,
+    fontWeight: '700',
+    letterSpacing: 1,
+    marginBottom: 6,
+  },
+  notesContent: {
+    color: '#cbd5e1',
+    fontSize: 13,
+    lineHeight: 18,
+  },
+  updateButtonStack: {
+    flexDirection: 'row',
+    gap: 12,
+  },
+  updateLaterButton: {
+    flex: 1,
+    backgroundColor: '#1e293b',
+    paddingVertical: 12,
+    borderRadius: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  updateLaterButtonText: {
+    color: '#94a3b8',
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  updateNowButton: {
+    flex: 1.6,
+    backgroundColor: '#38bdf8',
+    paddingVertical: 12,
+    borderRadius: 8,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  updateNowButtonText: {
+    color: '#090d16',
+    fontSize: 14,
+    fontWeight: '700',
+  },
 });
+
