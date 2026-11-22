@@ -2,7 +2,7 @@
   "expo": {
     "name": "Cinema",
     "slug": "cinema",
-    "version": "1.0.3",
+    "version": "1.0.4",
     "orientation": "default",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "dark",
@@ -11,7 +11,7 @@
       "bundleIdentifier": "com.imon.cinema"
     },
     "android": {
-      "versionCode": 4,
+      "versionCode": 5,
       "adaptiveIcon": {
         "foregroundImage": "./assets/android-icon-foreground.png",
         "backgroundColor": "#020617"
@@ -20,7 +20,8 @@
       "permissions": [
         "INTERNET",
         "ACCESS_NETWORK_STATE",
-        "WAKE_LOCK"
+        "WAKE_LOCK",
+        "REQUEST_INSTALL_PACKAGES"
       ]
     },
     "extra": {
