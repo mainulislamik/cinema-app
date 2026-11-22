@@ -4,14 +4,12 @@ import {
   Text,
   View,
   TouchableOpacity,
-  TextInput,
   SafeAreaView,
   StatusBar,
   ActivityIndicator,
   BackHandler,
   Modal,
   Platform,
-  KeyboardAvoidingView,
   ScrollView,
   RefreshControl,
   Linking,
@@ -23,7 +21,7 @@ import { Feather } from '@expo/vector-icons';
 
 const STORAGE_KEY = '@cinema_server_url';
 const DEFAULT_SERVER_URL = 'http://169.40.116.114:8099';
-const CURRENT_APP_VERSION = '1.0.1';
+const CURRENT_APP_VERSION = '1.0.2';
 
 const isNewerVersion = (remoteVer, currentVer) => {
   if (!remoteVer || typeof remoteVer !== 'string') return false;
@@ -45,25 +43,19 @@ const isNewerVersion = (remoteVer, currentVer) => {
 };
 
 export default function App() {
-  const [serverUrl, setServerUrl] = useState(DEFAULT_SERVER_URL);
-  const [tempUrl, setTempUrl] = useState(DEFAULT_SERVER_URL);
   const [isStorageLoaded, setIsStorageLoaded] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [hasError, setHasError] = useState(false);
-  const [errorDetails, setErrorDetails] = useState('');
   const [canGoBack, setCanGoBack] = useState(false);
-  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [sessionKey, setSessionKey] = useState(0);
 
   // Auto-update checker states
   const [updateModalVisible, setUpdateModalVisible] = useState(false);
   const [updateInfo, setUpdateInfo] = useState(null);
-  const [isCheckingUpdate, setIsCheckingUpdate] = useState(false);
 
   const webViewRef = useRef(null);
   const canGoBackRef = useRef(false);
-  const isSettingsOpenRef = useRef(false);
   const updateModalVisibleRef = useRef(false);
 
   useEffect(() => {
@@ -71,84 +63,47 @@ export default function App() {
   }, [canGoBack]);
 
   useEffect(() => {
-    isSettingsOpenRef.current = isSettingsOpen;
-  }, [isSettingsOpen]);
-
-  useEffect(() => {
     updateModalVisibleRef.current = updateModalVisible;
   }, [updateModalVisible]);
 
-  const normalizeUrl = (raw) => {
-    let url = (raw || '').trim();
-    if (!url) return DEFAULT_SERVER_URL;
-    if (!/^https?:\/\//i.test(url)) {
-      url = 'http://' + url;
-    }
-    return url.replace(/\/+$/, '');
-  };
+  const checkForUpdates = useCallback(async () => {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 5000);
 
-  const checkForUpdates = useCallback(
-    async (targetUrl, manualTrigger = false) => {
-      const base = normalizeUrl(targetUrl || serverUrl);
-      setIsCheckingUpdate(true);
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 5000);
+    try {
+      const response = await fetch(`${DEFAULT_SERVER_URL}/api/app/version`, {
+        signal: controller.signal,
+        headers: { Accept: 'application/json' },
+      });
+      clearTimeout(timeoutId);
 
-      try {
-        const response = await fetch(`${base}/api/app/version`, {
-          signal: controller.signal,
-          headers: { Accept: 'application/json' },
-        });
-        clearTimeout(timeoutId);
-
-        if (!response.ok) {
-          throw new Error(`Server responded with status ${response.status}`);
-        }
-
-        const data = await response.json();
-        if (data && isNewerVersion(data.version, CURRENT_APP_VERSION)) {
-          setUpdateInfo(data);
-          setUpdateModalVisible(true);
-        } else if (manualTrigger) {
-          Alert.alert('Up to Date', `You are using the latest version (v${CURRENT_APP_VERSION}).`);
-        }
-      } catch (err) {
-        clearTimeout(timeoutId);
-        if (manualTrigger) {
-          Alert.alert('Check Failed', 'Could not reach update server.');
-        }
-      } finally {
-        setIsCheckingUpdate(false);
+      if (!response.ok) {
+        throw new Error(`Server responded with status ${response.status}`);
       }
-    },
-    [serverUrl]
-  );
 
-  // Load configured server URL from storage on startup and check for updates
+      const data = await response.json();
+      if (data && isNewerVersion(data.version, CURRENT_APP_VERSION)) {
+        setUpdateInfo(data);
+        setUpdateModalVisible(true);
+      }
+    } catch (err) {
+      clearTimeout(timeoutId);
+    }
+  }, []);
+
+  // Ensure app always points to DEFAULT_SERVER_URL and overwrite any stale cached URLs
   useEffect(() => {
-    const loadSavedUrl = async () => {
-      let initialUrl = DEFAULT_SERVER_URL;
+    const initServerUrl = async () => {
       try {
-        const stored = await AsyncStorage.getItem(STORAGE_KEY);
-        if (stored && stored.trim().length > 0) {
-          let trimmed = stored.trim();
-          // Auto-migrate from old local network IP or localhost to VPS IP
-          if (trimmed.includes('192.168.100.13') || trimmed.includes('localhost') || trimmed.includes('127.0.0.1')) {
-            trimmed = DEFAULT_SERVER_URL;
-            await AsyncStorage.setItem(STORAGE_KEY, DEFAULT_SERVER_URL);
-          }
-          initialUrl = trimmed;
-          setServerUrl(initialUrl);
-          setTempUrl(initialUrl);
-        }
+        await AsyncStorage.setItem(STORAGE_KEY, DEFAULT_SERVER_URL);
       } catch (err) {
         console.warn('Unable to access AsyncStorage:', err);
       } finally {
         setIsStorageLoaded(true);
-        checkForUpdates(initialUrl, false);
+        checkForUpdates();
       }
     };
-    loadSavedUrl();
+    initServerUrl();
   }, [checkForUpdates]);
 
   // Hardware back button support
@@ -158,15 +113,11 @@ export default function App() {
         setUpdateModalVisible(false);
         return true;
       }
-      if (isSettingsOpenRef.current) {
-        setIsSettingsOpen(false);
-        return true;
-      }
       if (canGoBackRef.current && webViewRef.current) {
         webViewRef.current.goBack();
         return true;
       }
-      return false; // Exit app or pass to system cleanly
+      return false;
     };
 
     const backSubscription = BackHandler.addEventListener(
@@ -177,30 +128,9 @@ export default function App() {
     return () => backSubscription.remove();
   }, []);
 
-  const handleSaveUrl = async () => {
-    const formatted = normalizeUrl(tempUrl);
-    setServerUrl(formatted);
-    setTempUrl(formatted);
-    setIsSettingsOpen(false);
-    setHasError(false);
-    setIsLoading(true);
-    setSessionKey((prev) => prev + 1);
-
-    try {
-      await AsyncStorage.setItem(STORAGE_KEY, formatted);
-    } catch (err) {
-      console.warn('Failed to persist server URL:', err);
-    }
-  };
-
-  const handleResetDefaultUrl = () => {
-    setTempUrl(DEFAULT_SERVER_URL);
-  };
-
   const handleRetry = useCallback(() => {
     setHasError(false);
     setIsLoading(true);
-    setErrorDetails('');
     setSessionKey((prev) => prev + 1);
   }, []);
 
@@ -217,7 +147,7 @@ export default function App() {
     const downloadPath = updateInfo.download_url || '/downloads/cinema.apk';
     let apkUrl = downloadPath;
     if (!/^https?:\/\//i.test(downloadPath)) {
-      const base = serverUrl.replace(/\/+$/, '');
+      const base = DEFAULT_SERVER_URL.replace(/\/+$/, '');
       apkUrl = `${base}${downloadPath.startsWith('/') ? '' : '/'}${downloadPath}`;
     }
     try {
@@ -229,24 +159,20 @@ export default function App() {
   };
 
   const handleWebViewError = (syntheticEvent) => {
-    const { nativeEvent } = syntheticEvent;
-    console.warn('WebView error occurred:', nativeEvent);
+    console.warn('WebView error occurred:', syntheticEvent.nativeEvent);
     setHasError(true);
     setIsLoading(false);
-    setErrorDetails(nativeEvent.description || 'Connection refused or timed out');
   };
 
   const handleHttpError = (syntheticEvent) => {
-    const { nativeEvent } = syntheticEvent;
-    if (nativeEvent.statusCode >= 400) {
-      console.warn('WebView HTTP error:', nativeEvent.statusCode);
+    if (syntheticEvent.nativeEvent.statusCode >= 400) {
+      console.warn('WebView HTTP error:', syntheticEvent.nativeEvent.statusCode);
       setHasError(true);
       setIsLoading(false);
-      setErrorDetails(`Server responded with HTTP ${nativeEvent.statusCode}`);
     }
   };
 
-  // Wait until stored URL is retrieved before mounting WebView
+  // Wait until storage initialization completes before mounting WebView
   if (!isStorageLoaded) {
     return (
       <View style={styles.splashScreen}>
@@ -272,8 +198,8 @@ export default function App() {
       <View style={styles.webContainer}>
         <WebView
           ref={webViewRef}
-          key={`cinema-wv-${sessionKey}-${serverUrl}`}
-          source={{ uri: serverUrl }}
+          key={`cinema-wv-${sessionKey}`}
+          source={{ uri: DEFAULT_SERVER_URL }}
           style={styles.webView}
           javaScriptEnabled={true}
           domStorageEnabled={true}
@@ -301,10 +227,12 @@ export default function App() {
           onError={handleWebViewError}
           onReceivedError={handleWebViewError}
           onHttpError={handleHttpError}
-          renderError={() => null}
+          renderError={() => (
+            <View style={{ flex: 1, backgroundColor: '#090d16' }} />
+          )}
         />
 
-        {/* Sleek Dark Slate Initial/Reload Loading Screen */}
+        {/* Initial / Reload Loading Screen */}
         {isLoading && !hasError && (
           <View style={styles.loadingOverlay}>
             <View style={styles.brandingCard}>
@@ -318,18 +246,11 @@ export default function App() {
             </View>
 
             <ActivityIndicator size="large" color="#38bdf8" style={styles.loader} />
-            <Text style={styles.loadingCaption}>Connecting to Cinema server...</Text>
-
-            <View style={styles.urlIndicator}>
-              <Feather name="server" size={12} color="#64748b" style={{ marginRight: 6 }} />
-              <Text style={styles.urlIndicatorText} numberOfLines={1}>
-                {serverUrl}
-              </Text>
-            </View>
+            <Text style={styles.loadingCaption}>Loading Cinema...</Text>
           </View>
         )}
 
-        {/* Premium Offline / Connection Failed Screen */}
+        {/* Server Offline Screen */}
         {hasError && (
           <View style={styles.errorOverlay}>
             <ScrollView
@@ -347,160 +268,20 @@ export default function App() {
                 <Feather name="wifi-off" size={32} color="#94a3b8" />
               </View>
 
-              <Text style={styles.errorHeading}>Connection Failed</Text>
-              <Text style={styles.errorSubHeading}>
-                Cannot connect to Cinema Server at
-              </Text>
+              <Text style={styles.errorHeading}>Server Offline</Text>
 
-              <View style={styles.serverPill}>
-                <Feather name="server" size={13} color="#38bdf8" style={{ marginRight: 6 }} />
-                <Text style={styles.serverPillText} numberOfLines={1}>
-                  {serverUrl}
-                </Text>
-              </View>
-
-              <Text style={styles.errorBody}>
-                {errorDetails
-                  ? `Diagnostics: ${errorDetails}.`
-                  : 'The host server is unreachable.'}{' '}
-                Please check that the streaming server is running and your device is connected to the same local network or BDIX.
-              </Text>
-
-              <View style={styles.errorButtonStack}>
-                <TouchableOpacity
-                  style={styles.retryButton}
-                  activeOpacity={0.85}
-                  onPress={handleRetry}
-                >
-                  <Feather name="refresh-cw" size={16} color="#090d16" style={{ marginRight: 8 }} />
-                  <Text style={styles.retryButtonText}>Retry Connection</Text>
-                </TouchableOpacity>
-
-                <TouchableOpacity
-                  style={styles.changeServerButton}
-                  activeOpacity={0.85}
-                  onPress={() => {
-                    setTempUrl(serverUrl);
-                    setIsSettingsOpen(true);
-                  }}
-                >
-                  <Feather name="sliders" size={16} color="#f8fafc" style={{ marginRight: 8 }} />
-                  <Text style={styles.changeServerButtonText}>Change Server Address</Text>
-                </TouchableOpacity>
-              </View>
-
-              <Text style={styles.pullHint}>Pull down anywhere to retry</Text>
+              <TouchableOpacity
+                style={styles.retryButton}
+                activeOpacity={0.85}
+                onPress={handleRetry}
+              >
+                <Feather name="refresh-cw" size={16} color="#090d16" style={{ marginRight: 8 }} />
+                <Text style={styles.retryButtonText}>Retry</Text>
+              </TouchableOpacity>
             </ScrollView>
           </View>
         )}
-
-        {/* Discreet Quick Config button when stream is loaded */}
-        {!hasError && !isLoading && (
-          <TouchableOpacity
-            style={styles.floatingSettingsToggle}
-            activeOpacity={0.7}
-            onPress={() => {
-              setTempUrl(serverUrl);
-              setIsSettingsOpen(true);
-            }}
-          >
-            <Feather name="sliders" size={14} color="#94a3b8" />
-          </TouchableOpacity>
-        )}
       </View>
-
-      {/* Configure Server Address & Settings Modal */}
-      <Modal
-        visible={isSettingsOpen}
-        animationType="fade"
-        transparent={true}
-        onRequestClose={() => setIsSettingsOpen(false)}
-      >
-        <KeyboardAvoidingView
-          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-          style={styles.modalBackdrop}
-        >
-          <View style={styles.modalSheet}>
-            <View style={styles.modalHeader}>
-              <View style={styles.modalHeaderTitleRow}>
-                <Feather name="sliders" size={18} color="#f8fafc" />
-                <Text style={styles.modalHeading}>Server Settings</Text>
-              </View>
-              <TouchableOpacity
-                onPress={() => setIsSettingsOpen(false)}
-                hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
-              >
-                <Feather name="x" size={20} color="#94a3b8" />
-              </TouchableOpacity>
-            </View>
-
-            {/* Version Badge & Check Updates */}
-            <View style={styles.versionContainer}>
-              <View style={styles.versionBadge}>
-                <Feather name="smartphone" size={13} color="#94a3b8" style={{ marginRight: 6 }} />
-                <Text style={styles.versionBadgeText}>Cinema v{CURRENT_APP_VERSION}</Text>
-              </View>
-              <TouchableOpacity
-                style={styles.checkUpdateButton}
-                activeOpacity={0.8}
-                disabled={isCheckingUpdate}
-                onPress={() => checkForUpdates(serverUrl, true)}
-              >
-                {isCheckingUpdate ? (
-                  <ActivityIndicator size="small" color="#38bdf8" />
-                ) : (
-                  <>
-                    <Feather name="refresh-cw" size={12} color="#38bdf8" style={{ marginRight: 6 }} />
-                    <Text style={styles.checkUpdateButtonText}>Check for Updates</Text>
-                  </>
-                )}
-              </TouchableOpacity>
-            </View>
-
-            <Text style={styles.fieldLabel}>SERVER URL / IP ADDRESS</Text>
-            <TextInput
-              style={styles.urlInput}
-              value={tempUrl}
-              onChangeText={setTempUrl}
-              placeholder="http://192.168.100.13:8099"
-              placeholderTextColor="#64748b"
-              autoCapitalize="none"
-              autoCorrect={false}
-              keyboardType="url"
-              returnKeyType="done"
-              onSubmitEditing={handleSaveUrl}
-            />
-
-            <TouchableOpacity
-              style={styles.resetRow}
-              activeOpacity={0.7}
-              onPress={handleResetDefaultUrl}
-            >
-              <Feather name="corner-down-left" size={12} color="#64748b" style={{ marginRight: 6 }} />
-              <Text style={styles.resetRowText}>Reset to default ({DEFAULT_SERVER_URL})</Text>
-            </TouchableOpacity>
-
-            <View style={styles.modalFooter}>
-              <TouchableOpacity
-                style={styles.cancelAction}
-                activeOpacity={0.8}
-                onPress={() => setIsSettingsOpen(false)}
-              >
-                <Text style={styles.cancelActionText}>Cancel</Text>
-              </TouchableOpacity>
-
-              <TouchableOpacity
-                style={styles.saveAction}
-                activeOpacity={0.85}
-                onPress={handleSaveUrl}
-              >
-                <Feather name="check" size={15} color="#090d16" style={{ marginRight: 6 }} />
-                <Text style={styles.saveActionText}>Save & Connect</Text>
-              </TouchableOpacity>
-            </View>
-          </View>
-        </KeyboardAvoidingView>
-      </Modal>
 
       {/* In-App Update Modal */}
       <Modal
@@ -528,7 +309,7 @@ export default function App() {
             <View style={styles.updateVersionRow}>
               <View style={styles.updateVersionBadge}>
                 <Text style={styles.updateVersionBadgeText}>
-                  v{updateInfo?.version || '1.0.1'}
+                  v{updateInfo?.version || CURRENT_APP_VERSION}
                 </Text>
               </View>
               {updateInfo?.architecture ? (
@@ -606,7 +387,7 @@ const styles = StyleSheet.create({
     marginTop: 24,
   },
 
-  /* Sleek Loading Overlay */
+  /* Loading Overlay */
   loadingOverlay: {
     ...StyleSheet.absoluteFillObject,
     backgroundColor: '#090d16',
@@ -652,23 +433,6 @@ const styles = StyleSheet.create({
     color: '#94a3b8',
     fontSize: 13,
     fontWeight: '500',
-    marginBottom: 12,
-  },
-  urlIndicator: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#0f172a',
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 6,
-    borderWidth: 1,
-    borderColor: '#1e293b',
-    maxWidth: '90%',
-  },
-  urlIndicatorText: {
-    color: '#64748b',
-    fontSize: 12,
-    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
   },
 
   /* Offline / Error Overlay */
@@ -699,44 +463,8 @@ const styles = StyleSheet.create({
     color: '#f8fafc',
     fontSize: 20,
     fontWeight: '700',
-    marginBottom: 8,
+    marginBottom: 24,
     textAlign: 'center',
-  },
-  errorSubHeading: {
-    color: '#94a3b8',
-    fontSize: 13,
-    marginBottom: 10,
-    textAlign: 'center',
-  },
-  serverPill: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#0f172a',
-    borderWidth: 1,
-    borderColor: '#334155',
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 6,
-    marginBottom: 16,
-    maxWidth: '92%',
-  },
-  serverPillText: {
-    color: '#38bdf8',
-    fontSize: 12,
-    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
-  },
-  errorBody: {
-    color: '#64748b',
-    fontSize: 12,
-    lineHeight: 18,
-    textAlign: 'center',
-    marginBottom: 28,
-    paddingHorizontal: 8,
-  },
-  errorButtonStack: {
-    width: '100%',
-    gap: 12,
-    marginBottom: 20,
   },
   retryButton: {
     backgroundColor: '#f8fafc',
@@ -744,6 +472,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     paddingVertical: 13,
+    paddingHorizontal: 32,
     borderRadius: 8,
   },
   retryButtonText: {
@@ -751,44 +480,8 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: '700',
   },
-  changeServerButton: {
-    backgroundColor: '#0f172a',
-    borderWidth: 1,
-    borderColor: '#334155',
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingVertical: 13,
-    borderRadius: 8,
-  },
-  changeServerButtonText: {
-    color: '#f8fafc',
-    fontSize: 14,
-    fontWeight: '600',
-  },
-  pullHint: {
-    color: '#475569',
-    fontSize: 11,
-    marginTop: 8,
-  },
 
-  /* Subtle Quick Settings Button */
-  floatingSettingsToggle: {
-    position: 'absolute',
-    top: 14,
-    right: 14,
-    width: 32,
-    height: 32,
-    borderRadius: 16,
-    backgroundColor: 'rgba(15, 23, 42, 0.7)',
-    borderWidth: 1,
-    borderColor: 'rgba(51, 65, 85, 0.5)',
-    alignItems: 'center',
-    justifyContent: 'center',
-    zIndex: 5,
-  },
-
-  /* Modal Sheet */
+  /* Modal Backdrop & In-App Update Modal */
   modalBackdrop: {
     flex: 1,
     backgroundColor: 'rgba(0, 0, 0, 0.75)',
@@ -796,132 +489,6 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     padding: 20,
   },
-  modalSheet: {
-    width: '100%',
-    backgroundColor: '#0f172a',
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: '#1e293b',
-    padding: 20,
-  },
-  modalHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    marginBottom: 16,
-  },
-  modalHeaderTitleRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-  },
-  modalHeading: {
-    color: '#f8fafc',
-    fontSize: 17,
-    fontWeight: '700',
-  },
-
-  /* Version Badge & Check Updates */
-  versionContainer: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    backgroundColor: '#090d16',
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: '#1e293b',
-    marginBottom: 16,
-  },
-  versionBadge: {
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  versionBadgeText: {
-    color: '#f8fafc',
-    fontSize: 12,
-    fontWeight: '600',
-    letterSpacing: 0.5,
-  },
-  checkUpdateButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#1e293b',
-    borderWidth: 1,
-    borderColor: '#334155',
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    borderRadius: 6,
-  },
-  checkUpdateButtonText: {
-    color: '#38bdf8',
-    fontSize: 12,
-    fontWeight: '600',
-  },
-
-  fieldLabel: {
-    color: '#94a3b8',
-    fontSize: 11,
-    fontWeight: '700',
-    letterSpacing: 1,
-    marginBottom: 8,
-  },
-  urlInput: {
-    backgroundColor: '#090d16',
-    borderWidth: 1,
-    borderColor: '#334155',
-    borderRadius: 8,
-    paddingHorizontal: 14,
-    paddingVertical: 11,
-    color: '#f8fafc',
-    fontSize: 14,
-    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
-    marginBottom: 8,
-  },
-  resetRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: 20,
-    paddingVertical: 4,
-  },
-  resetRowText: {
-    color: '#64748b',
-    fontSize: 11,
-  },
-  modalFooter: {
-    flexDirection: 'row',
-    gap: 12,
-  },
-  cancelAction: {
-    flex: 1,
-    backgroundColor: '#1e293b',
-    paddingVertical: 12,
-    borderRadius: 8,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  cancelActionText: {
-    color: '#94a3b8',
-    fontSize: 13,
-    fontWeight: '600',
-  },
-  saveAction: {
-    flex: 1.5,
-    backgroundColor: '#f8fafc',
-    paddingVertical: 12,
-    borderRadius: 8,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  saveActionText: {
-    color: '#090d16',
-    fontSize: 13,
-    fontWeight: '700',
-  },
-
-  /* In-App Update Modal */
   updateModalSheet: {
     width: '100%',
     backgroundColor: '#0f172a',
@@ -1027,4 +594,5 @@ const styles = StyleSheet.create({
     fontWeight: '700',
   },
 });
+
 
