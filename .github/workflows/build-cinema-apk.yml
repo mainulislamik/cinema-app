@@ -35,18 +35,62 @@ jobs:
       - name: Expo Prebuild (Generate Native Android Project)
         run: npx expo prebuild --platform android --clean --no-install
 
+      - name: Configure Standalone Release Signing
+        run: |
+          python3 -c "
+          path = 'android/app/build.gradle'
+          with open(path, 'r') as f:
+              content = f.read()
+
+          # Inject signingConfig signingConfigs.debug into release build type
+          if 'signingConfig signingConfigs.debug' not in content:
+              content = content.replace('buildTypes {', 'buildTypes {\n        release {\n            signingConfig signingConfigs.debug\n        }')
+          elif 'release {' in content:
+              # Ensure signingConfig is set in release
+              parts = content.split('release {')
+              sub_parts = parts[1].split('}', 1)
+              if 'signingConfig' not in sub_parts[0]:
+                  parts[1] = '\n            signingConfig signingConfigs.debug' + parts[1]
+                  content = 'release {'.join(parts)
+
+          with open(path, 'w') as f:
+              f.write(content)
+          print('Configured android/app/build.gradle for standalone release signing')
+          "
+
       - name: Grant Execute Permission to Gradlew
         run: chmod +x android/gradlew
 
       - name: Build Standalone Android APK via Gradle
         run: |
           cd android
-          ./gradlew assembleDebug --no-daemon --stacktrace
+          ./gradlew assembleRelease --no-daemon --stacktrace
 
       - name: Prepare APK Output
         run: |
           mkdir -p output_apk
-          cp android/app/build/outputs/apk/debug/app-debug.apk output_apk/cinema.apk
+          if [ -f android/app/build/outputs/apk/release/app-release.apk ]; then
+            cp android/app/build/outputs/apk/release/app-release.apk output_apk/cinema.apk
+          elif [ -f android/app/build/outputs/apk/debug/app-debug.apk ]; then
+            cp android/app/build/outputs/apk/debug/app-debug.apk output_apk/cinema.apk
+          else
+            find android/app/build/outputs/apk -name "*.apk" -exec cp {} output_apk/cinema.apk \;
+          fi
+
+      - name: Verify Embedded Offline JS Bundle in APK
+        run: |
+          python3 -c "
+          import zipfile, sys
+          apk_path = 'output_apk/cinema.apk'
+          with zipfile.ZipFile(apk_path, 'r') as z:
+              files = z.namelist()
+              bundles = [f for f in files if 'index.android.bundle' in f or 'bundle' in f]
+              print('Embedded bundle files detected in APK:', bundles)
+              if not any('index.android.bundle' in f for f in files):
+                  print('CRITICAL ERROR: Standalone APK is missing index.android.bundle!')
+                  sys.exit(1)
+          print('SUCCESS: Verified APK has offline JS bundle embedded. Safe from launch crashes.')
+          "
 
       - name: Upload Cinema APK Artifact
         uses: actions/upload-artifact@v4
