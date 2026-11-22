@@ -29,7 +29,11 @@
     },
     "extra": {
       "defaultApiUrl": "http://192.168.100.13:8099",
-      "offlineFallback": true
-    }
+      "offlineFallback": true,
+      "eas": {
+        "projectId": "5edbe0f6-4161-4be1-9f14-05af771423f8"
+      }
+    },
+    "owner": "mainulislamik"
   }
 }
