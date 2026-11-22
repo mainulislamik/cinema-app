@@ -22,7 +22,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Feather } from '@expo/vector-icons';
 
 const STORAGE_KEY = '@cinema_server_url';
-const DEFAULT_SERVER_URL = 'http://192.168.100.13:8099';
+const DEFAULT_SERVER_URL = 'http://169.40.116.114:8099';
 const CURRENT_APP_VERSION = '1.0.1';
 
 const isNewerVersion = (remoteVer, currentVer) => {
@@ -131,7 +131,13 @@ export default function App() {
       try {
         const stored = await AsyncStorage.getItem(STORAGE_KEY);
         if (stored && stored.trim().length > 0) {
-          initialUrl = stored.trim();
+          let trimmed = stored.trim();
+          // Auto-migrate from old local network IP or localhost to VPS IP
+          if (trimmed.includes('192.168.100.13') || trimmed.includes('localhost') || trimmed.includes('127.0.0.1')) {
+            trimmed = DEFAULT_SERVER_URL;
+            await AsyncStorage.setItem(STORAGE_KEY, DEFAULT_SERVER_URL);
+          }
+          initialUrl = trimmed;
           setServerUrl(initialUrl);
           setTempUrl(initialUrl);
         }
