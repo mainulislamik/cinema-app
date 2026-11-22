@@ -12,3 +12,4 @@ web-build/
 android/
 ios/
 output_apk/
+*.apk
