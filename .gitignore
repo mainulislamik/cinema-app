@@ -13,3 +13,4 @@ android/
 ios/
 output_apk/
 *.apk
+.env*
