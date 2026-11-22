@@ -1,403 +1,696 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   StyleSheet,
   Text,
   View,
-  FlatList,
   TouchableOpacity,
   TextInput,
-  Image,
   SafeAreaView,
   StatusBar,
-  ActivityIndicator
+  ActivityIndicator,
+  BackHandler,
+  Modal,
+  Platform,
+  KeyboardAvoidingView,
+  ScrollView,
+  RefreshControl,
 } from 'react-native';
+import { WebView } from 'react-native-webview';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { Feather } from '@expo/vector-icons';
 
-// Built-in offline fallback catalog embedded directly in the APK bundle.
-// Even if the central website / host is completely down, these titles and UI run 100% locally on the phone.
-const EMBEDDED_CATALOG = [
-  {
-    id: 'local_1',
-    title: 'Extraction 2',
-    year: '2023',
-    quality: '4K BDIX',
-    genre: 'Action',
-    poster: 'https://image.tmdb.org/t/p/w500/7gKI9hpEMcZUwYeCuQmACgit0a2.jpg',
-    source: 'BDIX Fast Mirror'
-  },
-  {
-    id: 'local_2',
-    title: 'Spider-Man: Across the Spider-Verse',
-    year: '2023',
-    quality: '1080p HD',
-    genre: 'Animation',
-    poster: 'https://image.tmdb.org/t/p/w500/8Vt6mWEReuy4Of61Lnj5Xj704m8.jpg',
-    source: 'CircleFTP BDIX'
-  },
-  {
-    id: 'local_3',
-    title: 'Oppenheimer',
-    year: '2023',
-    quality: '4K UltraHD',
-    genre: 'Drama / History',
-    poster: 'https://image.tmdb.org/t/p/w500/8Gxv8gSFCU0XGDykEGv7zR1n2ua.jpg',
-    source: 'SamOnline BDIX'
-  },
-  {
-    id: 'local_4',
-    title: 'John Wick: Chapter 4',
-    year: '2023',
-    quality: '1080p BDIX',
-    genre: 'Action / Thriller',
-    poster: 'https://image.tmdb.org/t/p/w500/vZloFAK7NKnMGKEslUsZ2b9IpQg.jpg',
-    source: 'AmberIT Mirror'
-  },
-  {
-    id: 'local_5',
-    title: 'Dune: Part Two',
-    year: '2024',
-    quality: '4K BDIX',
-    genre: 'Sci-Fi / Adventure',
-    poster: 'https://image.tmdb.org/t/p/w500/1pdfLvkbY9ohJlCjQH2CZjjYVvJ.jpg',
-    source: 'ICC FTP Mirror'
-  }
-];
+const STORAGE_KEY = '@cinema_server_url';
+const DEFAULT_SERVER_URL = 'http://192.168.100.13:8099';
 
 export default function App() {
-  const [movies, setMovies] = useState(EMBEDDED_CATALOG);
-  const [searchQuery, setSearchQuery] = useState('');
-  const [isServerOnline, setIsServerOnline] = useState(true);
-  const [selectedMovie, setSelectedMovie] = useState(null);
-  const [activeTab, setActiveTab] = useState('home');
+  const [serverUrl, setServerUrl] = useState(DEFAULT_SERVER_URL);
+  const [tempUrl, setTempUrl] = useState(DEFAULT_SERVER_URL);
+  const [isStorageLoaded, setIsStorageLoaded] = useState(false);
+  const [isLoading, setIsLoading] = useState(true);
+  const [hasError, setHasError] = useState(false);
+  const [errorDetails, setErrorDetails] = useState('');
+  const [canGoBack, setCanGoBack] = useState(false);
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const [sessionKey, setSessionKey] = useState(0);
+
+  const webViewRef = useRef(null);
+  const canGoBackRef = useRef(false);
+  const isSettingsOpenRef = useRef(false);
 
   useEffect(() => {
-    loadCachedCatalog();
-    syncWithServer();
+    canGoBackRef.current = canGoBack;
+  }, [canGoBack]);
+
+  useEffect(() => {
+    isSettingsOpenRef.current = isSettingsOpen;
+  }, [isSettingsOpen]);
+
+  // Load configured server URL from storage on startup
+  useEffect(() => {
+    const loadSavedUrl = async () => {
+      try {
+        const stored = await AsyncStorage.getItem(STORAGE_KEY);
+        if (stored && stored.trim().length > 0) {
+          const cleanUrl = stored.trim();
+          setServerUrl(cleanUrl);
+          setTempUrl(cleanUrl);
+        }
+      } catch (err) {
+        console.warn('Unable to access AsyncStorage:', err);
+      } finally {
+        setIsStorageLoaded(true);
+      }
+    };
+    loadSavedUrl();
   }, []);
 
-  // 1. Load cached movies from device local storage
-  const loadCachedCatalog = async () => {
-    try {
-      const cached = await AsyncStorage.getItem('@cinema_cached_catalog');
-      if (cached) {
-        const parsed = JSON.parse(cached);
-        if (parsed && parsed.length > 0) {
-          setMovies(parsed);
-        }
+  // Hardware back button support
+  useEffect(() => {
+    const onBackPress = () => {
+      if (isSettingsOpenRef.current) {
+        setIsSettingsOpen(false);
+        return true;
       }
-    } catch (e) {
-      console.log('Using embedded catalog');
+      if (canGoBackRef.current && webViewRef.current) {
+        webViewRef.current.goBack();
+        return true;
+      }
+      return false; // Exit app or pass to system cleanly
+    };
+
+    const backSubscription = BackHandler.addEventListener(
+      'hardwareBackPress',
+      onBackPress
+    );
+
+    return () => backSubscription.remove();
+  }, []);
+
+  const normalizeUrl = (raw) => {
+    let url = (raw || '').trim();
+    if (!url) return DEFAULT_SERVER_URL;
+    if (!/^https?:\/\//i.test(url)) {
+      url = 'http://' + url;
     }
+    return url.replace(/\/+$/, '');
   };
 
-  // 2. Try to sync with server. If server is down, keep running offline without errors!
-  const syncWithServer = async () => {
-    try {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 4000);
-      const res = await fetch('http://192.168.100.13:8099/api/featured', {
-        signal: controller.signal
-      });
-      clearTimeout(timeoutId);
+  const handleSaveUrl = async () => {
+    const formatted = normalizeUrl(tempUrl);
+    setServerUrl(formatted);
+    setTempUrl(formatted);
+    setIsSettingsOpen(false);
+    setHasError(false);
+    setIsLoading(true);
+    setSessionKey((prev) => prev + 1);
 
-      if (res.ok) {
-        const data = await res.json();
-        if (data && data.length > 0) {
-          setMovies(data);
-          setIsServerOnline(true);
-          await AsyncStorage.setItem('@cinema_cached_catalog', JSON.stringify(data));
-          return;
-        }
-      }
+    try {
+      await AsyncStorage.setItem(STORAGE_KEY, formatted);
     } catch (err) {
-      // Server down or offline: seamlessly fallback to local cache
-      setIsServerOnline(false);
+      console.warn('Failed to persist server URL:', err);
     }
   };
 
-  const filteredMovies = movies.filter((m) =>
-    (m.title || '').toLowerCase().includes(searchQuery.toLowerCase())
-  );
+  const handleResetDefaultUrl = () => {
+    setTempUrl(DEFAULT_SERVER_URL);
+  };
+
+  const handleRetry = useCallback(() => {
+    setHasError(false);
+    setIsLoading(true);
+    setErrorDetails('');
+    setSessionKey((prev) => prev + 1);
+  }, []);
+
+  const handleRefresh = useCallback(() => {
+    setIsRefreshing(true);
+    handleRetry();
+    setTimeout(() => {
+      setIsRefreshing(false);
+    }, 1200);
+  }, [handleRetry]);
+
+  const handleWebViewError = (syntheticEvent) => {
+    const { nativeEvent } = syntheticEvent;
+    console.warn('WebView error occurred:', nativeEvent);
+    setHasError(true);
+    setIsLoading(false);
+    setErrorDetails(nativeEvent.description || 'Connection refused or timed out');
+  };
+
+  const handleHttpError = (syntheticEvent) => {
+    const { nativeEvent } = syntheticEvent;
+    if (nativeEvent.statusCode >= 400) {
+      console.warn('WebView HTTP error:', nativeEvent.statusCode);
+      setHasError(true);
+      setIsLoading(false);
+      setErrorDetails(`Server responded with HTTP ${nativeEvent.statusCode}`);
+    }
+  };
+
+  // Wait until stored URL is retrieved before mounting WebView
+  if (!isStorageLoaded) {
+    return (
+      <View style={styles.splashScreen}>
+        <StatusBar barStyle="light-content" translucent backgroundColor="#090d16" />
+        <View style={styles.brandingBox}>
+          <Feather name="film" size={32} color="#f8fafc" />
+          <Text style={styles.splashBrand}>CINEMA</Text>
+        </View>
+        <ActivityIndicator size="small" color="#38bdf8" style={styles.splashSpinner} />
+      </View>
+    );
+  }
 
   return (
-    <SafeAreaView style={styles.container}>
-      <StatusBar barStyle="light-content" backgroundColor="#020617" />
-
-      {/* Header */}
-      <View style={styles.header}>
-        <View style={styles.headerTitleRow}>
-          <Text style={styles.appName}>Cinema</Text>
-          <View style={styles.bdixBadge}>
-            <Text style={styles.bdixBadgeText}>BDIX</Text>
-          </View>
-        </View>
-
-        {/* Server Status Indicator */}
-        <View style={[styles.statusBadge, isServerOnline ? styles.onlineBadge : styles.offlineBadge]}>
-          <Text style={styles.statusBadgeText}>
-            {isServerOnline ? '● Live Server Connected' : '⚡ Local Offline Mode (Standalone)'}
-          </Text>
-        </View>
-      </View>
-
-      {/* Offline Info Banner if server down */}
-      {!isServerOnline && (
-        <View style={styles.offlineBanner}>
-          <Text style={styles.offlineBannerText}>
-            হোস্ট সার্ভার বন্ধ থাকলেও অ্যাপটি আপনার ফোনের লোকাল ইঞ্জিন ও ক্যাশে সম্পূর্ণ চালু আছে।
-          </Text>
-        </View>
-      )}
-
-      {/* Search Input */}
-      <View style={styles.searchContainer}>
-        <TextInput
-          style={styles.searchInput}
-          placeholder="মুভি বা সিরিজ খুঁজুন..."
-          placeholderTextColor="#64748b"
-          value={searchQuery}
-          onChangeText={setSearchQuery}
-        />
-      </View>
-
-      {/* Movie List */}
-      <FlatList
-        data={filteredMovies}
-        keyExtractor={(item) => String(item.id || item.title)}
-        contentContainerStyle={styles.listContent}
-        renderItem={({ item }) => (
-          <TouchableOpacity
-            style={styles.card}
-            activeOpacity={0.8}
-            onPress={() => setSelectedMovie(item)}
-          >
-            <Image
-              source={{ uri: item.poster || 'https://via.placeholder.com/300x450/0f172a/94a3b8?text=Cinema' }}
-              style={styles.poster}
-            />
-            <View style={styles.cardInfo}>
-              <Text style={styles.movieTitle} numberOfLines={1}>{item.title}</Text>
-              <View style={styles.metaRow}>
-                <Text style={styles.qualityTag}>{item.quality || 'HD'}</Text>
-                <Text style={styles.metaText}>{item.year || '2024'}</Text>
-                <Text style={styles.metaText}>• {item.genre || 'Action'}</Text>
-              </View>
-              <Text style={styles.sourceText}>{item.source || 'BDIX Direct'}</Text>
-            </View>
-          </TouchableOpacity>
-        )}
+    <SafeAreaView style={styles.rootContainer}>
+      <StatusBar
+        barStyle="light-content"
+        backgroundColor="#090d16"
+        translucent={true}
       />
 
-      {/* Detail Modal / Player Overlay */}
-      {selectedMovie && (
-        <View style={styles.detailOverlay}>
-          <View style={styles.detailBox}>
-            <Text style={styles.detailTitle}>{selectedMovie.title}</Text>
-            <Text style={styles.detailDesc}>
-              সরাসরি আপনার ডিভাইসে প্লে হচ্ছে। সেন্ট্রাল ওয়েবসাইট বা সার্ভার ডাউন থাকলেও BDIX লিংক ও লোকাল ক্যাশ থেকে ভিডিও নিরবচ্ছিন্ন চলবে।
-            </Text>
-            <TouchableOpacity
-              style={styles.playButton}
-              onPress={() => alert(`Playing: ${selectedMovie.title}`)}
-            >
-              <Text style={styles.playButtonText}>▶ Play Now (BDIX Stream)</Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={styles.closeButton}
-              onPress={() => setSelectedMovie(null)}
-            >
-              <Text style={styles.closeButtonText}>Close</Text>
-            </TouchableOpacity>
+      {/* Main WebView streaming container */}
+      <View style={styles.webContainer}>
+        <WebView
+          ref={webViewRef}
+          key={`cinema-wv-${sessionKey}-${serverUrl}`}
+          source={{ uri: serverUrl }}
+          style={styles.webView}
+          javaScriptEnabled={true}
+          domStorageEnabled={true}
+          allowsInlineMediaPlayback={true}
+          mediaPlaybackRequiresUserAction={false}
+          allowsFullscreenVideo={true}
+          cacheEnabled={true}
+          mixedContentMode="always"
+          allowsBackForwardNavigationGestures={true}
+          pullToRefreshEnabled={true}
+          originWhitelist={['*']}
+          setSupportMultipleWindows={false}
+          scalesPageToFit={true}
+          onNavigationStateChange={(navState) => {
+            setCanGoBack(navState.canGoBack);
+          }}
+          onLoadStart={() => {
+            if (!hasError) {
+              setIsLoading(true);
+            }
+          }}
+          onLoadEnd={() => {
+            setIsLoading(false);
+          }}
+          onError={handleWebViewError}
+          onReceivedError={handleWebViewError}
+          onHttpError={handleHttpError}
+          renderError={() => null}
+        />
+
+        {/* Sleek Dark Slate Initial/Reload Loading Screen */}
+        {isLoading && !hasError && (
+          <View style={styles.loadingOverlay}>
+            <View style={styles.brandingCard}>
+              <View style={styles.brandRow}>
+                <Feather name="film" size={28} color="#f8fafc" />
+                <Text style={styles.brandTitle}>CINEMA</Text>
+              </View>
+              <View style={styles.badgeContainer}>
+                <Text style={styles.badgeText}>STREAMING CLIENT</Text>
+              </View>
+            </View>
+
+            <ActivityIndicator size="large" color="#38bdf8" style={styles.loader} />
+            <Text style={styles.loadingCaption}>Connecting to Cinema server...</Text>
+
+            <View style={styles.urlIndicator}>
+              <Feather name="server" size={12} color="#64748b" style={{ marginRight: 6 }} />
+              <Text style={styles.urlIndicatorText} numberOfLines={1}>
+                {serverUrl}
+              </Text>
+            </View>
           </View>
-        </View>
-      )}
+        )}
+
+        {/* Premium Offline / Connection Failed Screen */}
+        {hasError && (
+          <View style={styles.errorOverlay}>
+            <ScrollView
+              contentContainerStyle={styles.errorScrollContent}
+              refreshControl={
+                <RefreshControl
+                  refreshing={isRefreshing}
+                  onRefresh={handleRefresh}
+                  tintColor="#38bdf8"
+                  colors={['#38bdf8']}
+                />
+              }
+            >
+              <View style={styles.errorIconCircle}>
+                <Feather name="wifi-off" size={32} color="#94a3b8" />
+              </View>
+
+              <Text style={styles.errorHeading}>Connection Failed</Text>
+              <Text style={styles.errorSubHeading}>
+                Cannot connect to Cinema Server at
+              </Text>
+
+              <View style={styles.serverPill}>
+                <Feather name="server" size={13} color="#38bdf8" style={{ marginRight: 6 }} />
+                <Text style={styles.serverPillText} numberOfLines={1}>
+                  {serverUrl}
+                </Text>
+              </View>
+
+              <Text style={styles.errorBody}>
+                {errorDetails
+                  ? `Diagnostics: ${errorDetails}.`
+                  : 'The host server is unreachable.'}{' '}
+                Please check that the streaming server is running and your device is connected to the same local network or BDIX.
+              </Text>
+
+              <View style={styles.errorButtonStack}>
+                <TouchableOpacity
+                  style={styles.retryButton}
+                  activeOpacity={0.85}
+                  onPress={handleRetry}
+                >
+                  <Feather name="refresh-cw" size={16} color="#090d16" style={{ marginRight: 8 }} />
+                  <Text style={styles.retryButtonText}>Retry Connection</Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  style={styles.changeServerButton}
+                  activeOpacity={0.85}
+                  onPress={() => {
+                    setTempUrl(serverUrl);
+                    setIsSettingsOpen(true);
+                  }}
+                >
+                  <Feather name="sliders" size={16} color="#f8fafc" style={{ marginRight: 8 }} />
+                  <Text style={styles.changeServerButtonText}>Change Server Address</Text>
+                </TouchableOpacity>
+              </View>
+
+              <Text style={styles.pullHint}>Pull down anywhere to retry</Text>
+            </ScrollView>
+          </View>
+        )}
+
+        {/* Discreet Quick Config button when stream is loaded */}
+        {!hasError && !isLoading && (
+          <TouchableOpacity
+            style={styles.floatingSettingsToggle}
+            activeOpacity={0.7}
+            onPress={() => {
+              setTempUrl(serverUrl);
+              setIsSettingsOpen(true);
+            }}
+          >
+            <Feather name="sliders" size={14} color="#94a3b8" />
+          </TouchableOpacity>
+        )}
+      </View>
+
+      {/* Configure Server Address Modal */}
+      <Modal
+        visible={isSettingsOpen}
+        animationType="fade"
+        transparent={true}
+        onRequestClose={() => setIsSettingsOpen(false)}
+      >
+        <KeyboardAvoidingView
+          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+          style={styles.modalBackdrop}
+        >
+          <View style={styles.modalSheet}>
+            <View style={styles.modalHeader}>
+              <View style={styles.modalHeaderTitleRow}>
+                <Feather name="sliders" size={18} color="#f8fafc" />
+                <Text style={styles.modalHeading}>Server Settings</Text>
+              </View>
+              <TouchableOpacity
+                onPress={() => setIsSettingsOpen(false)}
+                hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+              >
+                <Feather name="x" size={20} color="#94a3b8" />
+              </TouchableOpacity>
+            </View>
+
+            <Text style={styles.fieldLabel}>SERVER URL / IP ADDRESS</Text>
+            <TextInput
+              style={styles.urlInput}
+              value={tempUrl}
+              onChangeText={setTempUrl}
+              placeholder="http://192.168.100.13:8099"
+              placeholderTextColor="#64748b"
+              autoCapitalize="none"
+              autoCorrect={false}
+              keyboardType="url"
+              returnKeyType="done"
+              onSubmitEditing={handleSaveUrl}
+            />
+
+            <TouchableOpacity
+              style={styles.resetRow}
+              activeOpacity={0.7}
+              onPress={handleResetDefaultUrl}
+            >
+              <Feather name="corner-down-left" size={12} color="#64748b" style={{ marginRight: 6 }} />
+              <Text style={styles.resetRowText}>Reset to default ({DEFAULT_SERVER_URL})</Text>
+            </TouchableOpacity>
+
+            <View style={styles.modalFooter}>
+              <TouchableOpacity
+                style={styles.cancelAction}
+                activeOpacity={0.8}
+                onPress={() => setIsSettingsOpen(false)}
+              >
+                <Text style={styles.cancelActionText}>Cancel</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={styles.saveAction}
+                activeOpacity={0.85}
+                onPress={handleSaveUrl}
+              >
+                <Feather name="check" size={15} color="#090d16" style={{ marginRight: 6 }} />
+                <Text style={styles.saveActionText}>Save & Connect</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </KeyboardAvoidingView>
+      </Modal>
     </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
+  rootContainer: {
     flex: 1,
-    backgroundColor: '#020617',
+    backgroundColor: '#090d16',
+    paddingTop: Platform.OS === 'android' ? (StatusBar.currentHeight || 0) : 0,
   },
-  header: {
-    paddingHorizontal: 16,
-    paddingTop: 12,
-    paddingBottom: 8,
+  webContainer: {
+    flex: 1,
+    backgroundColor: '#090d16',
+    position: 'relative',
+  },
+  webView: {
+    flex: 1,
+    backgroundColor: '#090d16',
+  },
+
+  /* Startup Splash */
+  splashScreen: {
+    flex: 1,
+    backgroundColor: '#090d16',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  splashBrand: {
+    color: '#f8fafc',
+    fontSize: 22,
+    fontWeight: '800',
+    letterSpacing: 4,
+    marginTop: 12,
+  },
+  splashSpinner: {
+    marginTop: 24,
+  },
+
+  /* Sleek Loading Overlay */
+  loadingOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: '#090d16',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 24,
+    zIndex: 10,
+  },
+  brandingCard: {
+    alignItems: 'center',
+    marginBottom: 28,
+  },
+  brandRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    marginBottom: 8,
+  },
+  brandTitle: {
+    color: '#f8fafc',
+    fontSize: 24,
+    fontWeight: '800',
+    letterSpacing: 3,
+  },
+  badgeContainer: {
+    backgroundColor: '#1e293b',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 4,
+    borderWidth: 1,
+    borderColor: '#334155',
+  },
+  badgeText: {
+    color: '#94a3b8',
+    fontSize: 10,
+    fontWeight: '700',
+    letterSpacing: 1.5,
+  },
+  loader: {
+    marginBottom: 16,
+  },
+  loadingCaption: {
+    color: '#94a3b8',
+    fontSize: 13,
+    fontWeight: '500',
+    marginBottom: 12,
+  },
+  urlIndicator: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#0f172a',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: '#1e293b',
+    maxWidth: '90%',
+  },
+  urlIndicatorText: {
+    color: '#64748b',
+    fontSize: 12,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  },
+
+  /* Offline / Error Overlay */
+  errorOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: '#090d16',
+    zIndex: 20,
+  },
+  errorScrollContent: {
+    flexGrow: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 24,
+    paddingVertical: 40,
+  },
+  errorIconCircle: {
+    width: 64,
+    height: 64,
+    borderRadius: 32,
+    backgroundColor: '#0f172a',
+    borderWidth: 1,
+    borderColor: '#1e293b',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 20,
+  },
+  errorHeading: {
+    color: '#f8fafc',
+    fontSize: 20,
+    fontWeight: '700',
+    marginBottom: 8,
+    textAlign: 'center',
+  },
+  errorSubHeading: {
+    color: '#94a3b8',
+    fontSize: 13,
+    marginBottom: 10,
+    textAlign: 'center',
+  },
+  serverPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#0f172a',
+    borderWidth: 1,
+    borderColor: '#334155',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 6,
+    marginBottom: 16,
+    maxWidth: '92%',
+  },
+  serverPillText: {
+    color: '#38bdf8',
+    fontSize: 12,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  },
+  errorBody: {
+    color: '#64748b',
+    fontSize: 12,
+    lineHeight: 18,
+    textAlign: 'center',
+    marginBottom: 28,
+    paddingHorizontal: 8,
+  },
+  errorButtonStack: {
+    width: '100%',
+    gap: 12,
+    marginBottom: 20,
+  },
+  retryButton: {
+    backgroundColor: '#f8fafc',
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 13,
+    borderRadius: 8,
+  },
+  retryButtonText: {
+    color: '#090d16',
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  changeServerButton: {
+    backgroundColor: '#0f172a',
+    borderWidth: 1,
+    borderColor: '#334155',
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 13,
+    borderRadius: 8,
+  },
+  changeServerButtonText: {
+    color: '#f8fafc',
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  pullHint: {
+    color: '#475569',
+    fontSize: 11,
+    marginTop: 8,
+  },
+
+  /* Subtle Quick Settings Button */
+  floatingSettingsToggle: {
+    position: 'absolute',
+    top: 14,
+    right: 14,
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: 'rgba(15, 23, 42, 0.7)',
+    borderWidth: 1,
+    borderColor: 'rgba(51, 65, 85, 0.5)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 5,
+  },
+
+  /* Modal Sheet */
+  modalBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.75)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 20,
+  },
+  modalSheet: {
+    width: '100%',
+    backgroundColor: '#0f172a',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#1e293b',
+    padding: 20,
+  },
+  modalHeader: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    borderBottomWidth: 1,
-    borderBottomColor: '#1e293b'
+    marginBottom: 20,
   },
-  headerTitleRow: {
+  modalHeaderTitleRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 8
+    gap: 8,
   },
-  appName: {
-    fontSize: 22,
-    fontWeight: '800',
-    color: '#ffffff',
-    letterSpacing: -0.5
-  },
-  bdixBadge: {
-    backgroundColor: '#e11d48',
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-    borderRadius: 4
-  },
-  bdixBadgeText: {
-    color: '#ffffff',
-    fontSize: 10,
-    fontWeight: '700'
-  },
-  statusBadge: {
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: 9999
-  },
-  onlineBadge: {
-    backgroundColor: 'rgba(16, 185, 129, 0.15)',
-  },
-  offlineBadge: {
-    backgroundColor: 'rgba(245, 158, 11, 0.15)',
-  },
-  statusBadgeText: {
-    fontSize: 11,
-    fontWeight: '600',
-    color: '#34d399'
-  },
-  offlineBanner: {
-    backgroundColor: '#1e1b4b',
-    borderBottomWidth: 1,
-    borderBottomColor: '#312e81',
-    paddingHorizontal: 16,
-    paddingVertical: 6
-  },
-  offlineBannerText: {
-    color: '#cbd5e1',
-    fontSize: 11,
-    textAlign: 'center'
-  },
-  searchContainer: {
-    paddingHorizontal: 16,
-    paddingVertical: 10
-  },
-  searchInput: {
-    backgroundColor: '#0f172a',
-    borderColor: '#1e293b',
-    borderWidth: 1,
-    borderRadius: 8,
-    paddingHorizontal: 14,
-    paddingVertical: 10,
-    color: '#ffffff',
-    fontSize: 14
-  },
-  listContent: {
-    paddingHorizontal: 16,
-    paddingBottom: 24
-  },
-  card: {
-    flexDirection: 'row',
-    backgroundColor: '#0f172a',
-    borderRadius: 10,
-    marginBottom: 12,
-    borderWidth: 1,
-    borderColor: '#1e293b',
-    overflow: 'hidden'
-  },
-  poster: {
-    width: 80,
-    height: 115,
-    backgroundColor: '#1e293b'
-  },
-  cardInfo: {
-    flex: 1,
-    padding: 12,
-    justifyContent: 'center'
-  },
-  movieTitle: {
-    color: '#ffffff',
-    fontSize: 15,
+  modalHeading: {
+    color: '#f8fafc',
+    fontSize: 17,
     fontWeight: '700',
-    marginBottom: 6
   },
-  metaRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    marginBottom: 6
-  },
-  qualityTag: {
-    backgroundColor: 'rgba(225, 29, 72, 0.2)',
-    color: '#fb7185',
-    fontSize: 10,
-    fontWeight: '700',
-    paddingHorizontal: 5,
-    paddingVertical: 1,
-    borderRadius: 4
-  },
-  metaText: {
+  fieldLabel: {
     color: '#94a3b8',
-    fontSize: 11
+    fontSize: 11,
+    fontWeight: '700',
+    letterSpacing: 1,
+    marginBottom: 8,
   },
-  sourceText: {
-    color: '#64748b',
-    fontSize: 11
-  },
-  detailOverlay: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
-    backgroundColor: 'rgba(0, 0, 0, 0.85)',
-    justifyContent: 'center',
-    alignItems: 'center',
-    padding: 20
-  },
-  detailBox: {
-    backgroundColor: '#0f172a',
-    borderRadius: 14,
+  urlInput: {
+    backgroundColor: '#090d16',
     borderWidth: 1,
     borderColor: '#334155',
-    padding: 20,
-    width: '100%'
+    borderRadius: 8,
+    paddingHorizontal: 14,
+    paddingVertical: 11,
+    color: '#f8fafc',
+    fontSize: 14,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    marginBottom: 8,
   },
-  detailTitle: {
-    color: '#ffffff',
-    fontSize: 18,
-    fontWeight: 'bold',
-    marginBottom: 8
+  resetRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 24,
+    paddingVertical: 4,
   },
-  detailDesc: {
-    color: '#94a3b8',
-    fontSize: 13,
-    lineHeight: 18,
-    marginBottom: 16
+  resetRowText: {
+    color: '#64748b',
+    fontSize: 11,
   },
-  playButton: {
-    backgroundColor: '#e11d48',
+  modalFooter: {
+    flexDirection: 'row',
+    gap: 12,
+  },
+  cancelAction: {
+    flex: 1,
+    backgroundColor: '#1e293b',
     paddingVertical: 12,
     borderRadius: 8,
     alignItems: 'center',
-    marginBottom: 10
+    justifyContent: 'center',
   },
-  playButtonText: {
-    color: '#ffffff',
-    fontWeight: '700',
-    fontSize: 14
-  },
-  closeButton: {
-    backgroundColor: '#1e293b',
-    paddingVertical: 10,
-    borderRadius: 8,
-    alignItems: 'center'
-  },
-  closeButtonText: {
+  cancelActionText: {
     color: '#94a3b8',
     fontSize: 13,
-    fontWeight: '500'
-  }
+    fontWeight: '600',
+  },
+  saveAction: {
+    flex: 1.5,
+    backgroundColor: '#f8fafc',
+    paddingVertical: 12,
+    borderRadius: 8,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  saveActionText: {
+    color: '#090d16',
+    fontSize: 13,
+    fontWeight: '700',
+  },
 });

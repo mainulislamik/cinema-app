@@ -3,7 +3,7 @@
     "name": "Cinema",
     "slug": "cinema",
     "version": "1.0.0",
-    "orientation": "portrait",
+    "orientation": "default",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "dark",
     "ios": {
@@ -18,7 +18,8 @@
       "package": "com.imon.cinema",
       "permissions": [
         "INTERNET",
-        "ACCESS_NETWORK_STATE"
+        "ACCESS_NETWORK_STATE",
+        "WAKE_LOCK"
       ]
     },
     "extra": {
