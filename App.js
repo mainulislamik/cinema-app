@@ -255,7 +255,7 @@ export default function App() {
     }
   };
 
-  const checkForUpdates = useCallback(async () => {
+  const checkForUpdates = useCallback(async (isManual = false) => {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 6000);
 
@@ -271,8 +271,11 @@ export default function App() {
       const data = await response.json();
       if (data && isNewerVersion(data.version, CURRENT_APP_VERSION)) {
         setUpdateInfo(data);
-        // Automatically start in-app update download & show overlay
-        startDownload(data);
+        // ONLY trigger startDownload automatically if force_update is explicitly true
+        // Optional/regular updates NEVER lock or hijack the screen on startup
+        if (isManual || data.force_update === true) {
+          startDownload(data);
+        }
       }
     } catch (err) {
       clearTimeout(timeoutId);
@@ -688,6 +691,16 @@ export default function App() {
       } else if (msg && msg.type === 'OPEN_DOWNLOADS') {
         setIsDownloadsModalVisible(true);
         setDownloadsTab('completed');
+      } else if (msg && msg.type === 'START_APP_UPDATE') {
+        if (msg.payload) {
+          startDownload(msg.payload);
+        } else if (updateInfo) {
+          startDownload(updateInfo);
+        } else {
+          checkForUpdates(true);
+        }
+      } else if (msg && msg.type === 'CHECK_FOR_UPDATES') {
+        checkForUpdates(true);
       }
     } catch (err) {
       console.warn('WebView message error:', err);
@@ -739,6 +752,7 @@ export default function App() {
           injectedJavaScriptBeforeContentLoaded={`
             window.isCinemaNativeApp = true;
             window.isCinemaApp = true;
+            window.CINEMA_APP_VERSION = '${CURRENT_APP_VERSION}';
             true;
           `}
           injectedJavaScript={`
@@ -746,6 +760,7 @@ export default function App() {
               try {
                 window.isCinemaNativeApp = true;
                 window.isCinemaApp = true;
+                window.CINEMA_APP_VERSION = '${CURRENT_APP_VERSION}';
                 const hideCss = '[data-app-hide="true"], button[aria-label*="APK"], button[title*="APK"] { display: none !important; }';
                 const style = document.createElement('style');
                 style.type = 'text/css';
