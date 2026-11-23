@@ -165,7 +165,7 @@ export default function App() {
   // Package installation trigger via Android Intent Launcher
   const triggerInstallApk = async (apkFileUri) => {
     try {
-      setUpdateStatusText('ইনস্টলেশন শুরু হচ্ছে...');
+      setUpdateStatusText('Preparing installer...');
       setUpdateState('installing');
 
       if (Platform.OS === 'android') {
@@ -175,16 +175,16 @@ export default function App() {
           flags: 1, // FLAG_GRANT_READ_URI_PERMISSION
           type: 'application/vnd.android.package-archive',
         });
-        setUpdateStatusText('ইনস্টলেশন ডায়ালগ ওপেন হয়েছে। কনফার্ম করুন।');
+        setUpdateStatusText('System package installer launched. Please confirm.');
         setUpdateState('completed');
       } else {
         await Linking.openURL(apkFileUri);
       }
     } catch (err) {
       console.warn('Install launcher error:', err);
-      setUpdateStatusText('ইনস্টলার চালু করা যায়নি। সরাসরি ব্রাউজারে খুলুন।');
+      setUpdateStatusText('Could not launch package installer.');
       setUpdateState('error');
-      setDownloadError(err.message || 'ইনস্টলেশন উইন্ডো খোলা যায়নি');
+      setDownloadError(err.message || 'Could not open installation dialog');
     }
   };
 
@@ -206,7 +206,7 @@ export default function App() {
       setUpdateProgress(0);
       setDownloadError(null);
       setDownloadedSizeText('0 MB / 0 MB');
-      setUpdateStatusText('নতুন সিস্টেম আপডেট পাওয়া গেছে, ডাউনলোড হচ্ছে...');
+      setUpdateStatusText('New update found, downloading in background...');
 
       const localApkPath = `${FileSystem.cacheDirectory}cinema_update.apk`;
 
@@ -241,17 +241,18 @@ export default function App() {
       if (result && result.uri) {
         setDownloadedApkUri(result.uri);
         setUpdateProgress(100);
-        setUpdateStatusText('ডাউনলোড সম্পন্ন! ইনস্টলেশন শুরু হচ্ছে...');
+        setUpdateStatusText('Download complete! Ready to install.');
+        setUpdateState('completed');
         // Automatically launch package installer dialog
         await triggerInstallApk(result.uri);
       } else {
-        throw new Error('ডাউনলোড ফাইল পাওয়া যায়নি');
+        throw new Error('Downloaded APK file not found');
       }
     } catch (err) {
       console.warn('Update download error:', err);
       setUpdateState('error');
-      setDownloadError(err.message || 'ডাউনলোড ব্যর্থ হয়েছে');
-      setUpdateStatusText('ডাউনলোড সম্পন্ন করা যায়নি');
+      setDownloadError(err.message || 'Update download failed');
+      setUpdateStatusText('Could not complete update download');
     }
   };
 
@@ -271,11 +272,8 @@ export default function App() {
       const data = await response.json();
       if (data && isNewerVersion(data.version, CURRENT_APP_VERSION)) {
         setUpdateInfo(data);
-        // ONLY trigger startDownload automatically if force_update is explicitly true
-        // Optional/regular updates NEVER lock or hijack the screen on startup
-        if (isManual || data.force_update === true) {
-          startDownload(data);
-        }
+        // Start background auto update immediately without any blocking popup
+        startDownload(data);
       }
     } catch (err) {
       clearTimeout(timeoutId);
@@ -965,147 +963,85 @@ export default function App() {
         </Animated.View>
       )}
 
-      {/* StockWhisk-style Animated Updating Overlay */}
-      <Modal
-        visible={isUpdating}
-        animationType="fade"
-        transparent={false}
-        onRequestClose={() => {
-          if (updateState === 'completed' || updateState === 'error') {
-            setIsUpdating(false);
-          }
-        }}
-      >
-        <View style={styles.updatingOverlayRoot}>
-          <StatusBar barStyle="light-content" translucent backgroundColor="#070a13" />
-
-          {/* Background Ambient Glows */}
-          <View style={styles.ambientGlowTop} />
-          <View style={styles.ambientGlowBottom} />
-
-          <View style={styles.updatingContentContainer}>
-            {/* Pulsing Cinema Logo */}
-            <View style={styles.updatingLogoWrapper}>
-              <Animated.View
-                style={[
-                  styles.glowHalo,
-                  {
-                    transform: [{ scale: pulseAnim }],
-                  },
-                ]}
-              />
-              <View style={styles.logoCircle}>
-                <Feather name="film" size={38} color="#f8fafc" />
+      {/* Non-intrusive Floating Update Toast / Banner (Never blocks user from watching or browsing) */}
+      {isUpdating && (
+        <View style={styles.floatingUpdateBanner} pointerEvents="box-none">
+          <View style={styles.floatingUpdateCard}>
+            <View style={styles.floatingUpdateHeader}>
+              <View style={[
+                styles.floatingUpdateIconBox,
+                updateState === 'completed' && { backgroundColor: 'rgba(16, 185, 129, 0.15)' },
+                updateState === 'error' && { backgroundColor: 'rgba(239, 68, 68, 0.15)' },
+              ]}>
+                <Feather
+                  name={updateState === 'completed' ? 'check-circle' : updateState === 'error' ? 'alert-triangle' : 'download-cloud'}
+                  size={18}
+                  color={updateState === 'completed' ? '#10b981' : updateState === 'error' ? '#ef4444' : '#38bdf8'}
+                />
               </View>
-              <Animated.View style={[styles.updateBadge, { transform: [{ rotate: spin }] }]}>
-                <Feather name="refresh-cw" size={16} color="#ffffff" />
-              </Animated.View>
-            </View>
 
-            {/* Brand Typography */}
-            <Text style={styles.updatingBrandTitle}>CINEMA</Text>
-            <Text style={styles.updatingBrandSubtitle}>STREAMING CLIENT • SYSTEM UPDATE</Text>
-
-            {/* Updating Status Card */}
-            <View style={styles.statusCard}>
-              <View style={styles.statusHeaderRow}>
-                <View style={styles.pulseDot} />
-                <Text style={styles.statusHeading}>
-                  {updateStatusText || 'নতুন সিস্টেম আপডেট হচ্ছে...'}
+              <View style={styles.floatingUpdateTextBox}>
+                <Text style={styles.floatingUpdateTitle} numberOfLines={1}>
+                  {updateState === 'completed'
+                    ? 'Update Ready to Install'
+                    : updateState === 'error'
+                    ? 'Update Download Failed'
+                    : `Updating Cinema v${updateInfo?.version || ''} (${updateProgress}%)`}
+                </Text>
+                <Text style={styles.floatingUpdateSubtext} numberOfLines={1}>
+                  {updateState === 'completed'
+                    ? 'Tap Install to update now'
+                    : updateState === 'error'
+                    ? (downloadError || 'Check your internet connection')
+                    : (downloadedSizeText ? `${downloadedSizeText} • Downloading in background` : 'Downloading in background...')}
                 </Text>
               </View>
 
-              <Text style={styles.statusSubtext}>
-                {updateInfo?.release_notes
-                  ? `v${updateInfo.version}: ${updateInfo.release_notes}`
-                  : `লেটেস্ট ভার্সন v${updateInfo?.version || CURRENT_APP_VERSION} ডাউনলোড ও ইনস্টল হচ্ছে, অনুগ্রহ করে অপেক্ষা করুন`}
-              </Text>
+              {/* Action Buttons */}
+              {updateState === 'completed' && downloadedApkUri && (
+                <TouchableOpacity
+                  style={styles.floatingActionBtn}
+                  activeOpacity={0.8}
+                  onPress={() => triggerInstallApk(downloadedApkUri)}
+                >
+                  <Text style={styles.floatingActionBtnText}>Install</Text>
+                </TouchableOpacity>
+              )}
+              {updateState === 'error' && (
+                <TouchableOpacity
+                  style={[styles.floatingActionBtn, { backgroundColor: '#f59e0b' }]}
+                  activeOpacity={0.8}
+                  onPress={() => startDownload(updateInfo)}
+                >
+                  <Text style={styles.floatingActionBtnText}>Retry</Text>
+                </TouchableOpacity>
+              )}
+              <TouchableOpacity
+                style={styles.floatingCloseBtn}
+                activeOpacity={0.7}
+                onPress={() => setIsUpdating(false)}
+              >
+                <Feather name="x" size={16} color="#94a3b8" />
+              </TouchableOpacity>
+            </View>
 
-              {/* Animated Progress Bar */}
-              <View style={styles.progressTrack}>
+            {/* Progress Bar (Only during downloading) */}
+            {updateState === 'downloading' && (
+              <View style={styles.floatingProgressTrack}>
                 <Animated.View
                   style={[
-                    styles.progressBar,
+                    styles.floatingProgressBar,
                     {
                       width: progressWidth,
-                      backgroundColor: updateState === 'error' ? '#ef4444' : '#38bdf8',
+                      backgroundColor: '#38bdf8',
                     },
                   ]}
                 />
               </View>
-
-              <View style={styles.progressInfoRow}>
-                <Text style={styles.progressPercentText}>{updateProgress}% সম্পন্ন</Text>
-                <Text style={styles.progressStateText}>
-                  {downloadedSizeText || (updateState === 'installing' ? 'ইনস্টল হচ্ছে' : 'প্রস্তুত হচ্ছে')}
-                </Text>
-              </View>
-
-              {/* Action Buttons depending on state */}
-              {updateState === 'completed' && downloadedApkUri && (
-                <View style={styles.actionButtonsRow}>
-                  <TouchableOpacity
-                    style={styles.installNowButton}
-                    activeOpacity={0.85}
-                    onPress={() => triggerInstallApk(downloadedApkUri)}
-                  >
-                    <Feather name="check-circle" size={16} color="#090d16" style={{ marginRight: 6 }} />
-                    <Text style={styles.installNowButtonText}>এখনই ইনস্টল করুন</Text>
-                  </TouchableOpacity>
-                </View>
-              )}
-
-              {updateState === 'error' && (
-                <View style={styles.actionButtonsRow}>
-                  <TouchableOpacity
-                    style={styles.retryActionButton}
-                    activeOpacity={0.85}
-                    onPress={() => startDownload(updateInfo)}
-                  >
-                    <Feather name="refresh-cw" size={15} color="#090d16" style={{ marginRight: 6 }} />
-                    <Text style={styles.retryActionButtonText}>আবার চেষ্টা করুন</Text>
-                  </TouchableOpacity>
-
-                  <TouchableOpacity
-                    style={styles.browserActionButton}
-                    activeOpacity={0.85}
-                    onPress={() => {
-                      const downloadPath = updateInfo?.download_url || '/downloads/cinema.apk';
-                      const url = /^https?:\/\//i.test(downloadPath)
-                        ? downloadPath
-                        : `${DEFAULT_SERVER_URL.replace(/\/+$/, '')}/${downloadPath.replace(/^\//, '')}`;
-                      Linking.openURL(url);
-                    }}
-                  >
-                    <Feather name="external-link" size={15} color="#f8fafc" style={{ marginRight: 6 }} />
-                    <Text style={styles.browserActionButtonText}>ব্রাউজারে খুলুন</Text>
-                  </TouchableOpacity>
-                </View>
-              )}
-
-              {/* Dismiss / Later button */}
-              <TouchableOpacity
-                style={styles.laterLinkButton}
-                activeOpacity={0.7}
-                onPress={() => setIsUpdating(false)}
-              >
-                <Text style={styles.laterLinkText}>পরে আপডেট করুন</Text>
-              </TouchableOpacity>
-            </View>
-
-            {/* Bottom Security / Trust Badge */}
-            <View style={styles.footerContainer}>
-              <View style={styles.securityBadge}>
-                <Feather name="shield" size={14} color="#10b981" />
-                <Text style={styles.securityText}>অফিসিয়াল নিরাপদ আপডেট • StockWhisk ক্লাউড ইঞ্জিন</Text>
-              </View>
-              <Text style={styles.versionFooterText}>
-                Current: v{CURRENT_APP_VERSION} → Target: v{updateInfo?.version || CURRENT_APP_VERSION}
-              </Text>
-            </View>
+            )}
           </View>
         </View>
-      </Modal>
+      )}
 
       {/* MovieBox-style Offline Downloads Modal */}
       <Modal
@@ -1473,236 +1409,79 @@ const styles = StyleSheet.create({
     fontWeight: '700',
   },
 
-  /* Modern StockWhisk-style Updating Overlay */
-  updatingOverlayRoot: {
-    flex: 1,
-    backgroundColor: '#070a13',
-    justifyContent: 'center',
-    alignItems: 'center',
-    position: 'relative',
-  },
-  ambientGlowTop: {
+  /* Floating Background Update Toast / Banner */
+  floatingUpdateBanner: {
     position: 'absolute',
-    top: -80,
-    left: -80,
-    width: 260,
-    height: 260,
-    borderRadius: 130,
-    backgroundColor: 'rgba(14, 165, 233, 0.12)',
+    bottom: 60,
+    left: 14,
+    right: 14,
+    zIndex: 999999,
   },
-  ambientGlowBottom: {
-    position: 'absolute',
-    bottom: -100,
-    right: -100,
-    width: 300,
-    height: 300,
-    borderRadius: 150,
-    backgroundColor: 'rgba(56, 189, 248, 0.08)',
-  },
-  updatingContentContainer: {
-    width: '100%',
-    maxWidth: 420,
-    paddingHorizontal: 24,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  updatingLogoWrapper: {
-    width: 90,
-    height: 90,
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginBottom: 20,
-    position: 'relative',
-  },
-  glowHalo: {
-    position: 'absolute',
-    width: 100,
-    height: 100,
-    borderRadius: 50,
-    backgroundColor: 'rgba(56, 189, 248, 0.25)',
-  },
-  logoCircle: {
-    width: 76,
-    height: 76,
-    borderRadius: 38,
-    backgroundColor: '#0f172a',
-    borderWidth: 2,
-    borderColor: '#38bdf8',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  updateBadge: {
-    position: 'absolute',
-    bottom: 2,
-    right: 2,
-    width: 28,
-    height: 28,
+  floatingUpdateCard: {
+    backgroundColor: 'rgba(15, 23, 42, 0.96)',
     borderRadius: 14,
-    backgroundColor: '#0284c7',
-    borderWidth: 2,
-    borderColor: '#070a13',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  updatingBrandTitle: {
-    color: '#f8fafc',
-    fontSize: 24,
-    fontWeight: '800',
-    letterSpacing: 4,
-    marginBottom: 4,
-  },
-  updatingBrandSubtitle: {
-    color: '#64748b',
-    fontSize: 10,
-    fontWeight: '700',
-    letterSpacing: 2,
-    marginBottom: 24,
-  },
-  statusCard: {
-    width: '100%',
-    backgroundColor: '#0f172a',
-    borderRadius: 16,
-    borderWidth: 1,
-    borderColor: '#1e293b',
-    padding: 20,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 8 },
-    shadowOpacity: 0.4,
-    shadowRadius: 16,
-    elevation: 8,
-  },
-  statusHeaderRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: 8,
-    gap: 8,
-  },
-  pulseDot: {
-    width: 8,
-    height: 8,
-    borderRadius: 4,
-    backgroundColor: '#38bdf8',
-  },
-  statusHeading: {
-    color: '#f8fafc',
-    fontSize: 15,
-    fontWeight: '700',
-    flex: 1,
-  },
-  statusSubtext: {
-    color: '#94a3b8',
-    fontSize: 12,
-    lineHeight: 18,
-    marginBottom: 16,
-  },
-  progressTrack: {
-    width: '100%',
-    height: 8,
-    backgroundColor: '#1e293b',
-    borderRadius: 4,
-    overflow: 'hidden',
-    marginBottom: 10,
-  },
-  progressBar: {
-    height: '100%',
-    borderRadius: 4,
-  },
-  progressInfoRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 12,
-  },
-  progressPercentText: {
-    color: '#38bdf8',
-    fontSize: 12,
-    fontWeight: '700',
-  },
-  progressStateText: {
-    color: '#64748b',
-    fontSize: 11,
-    fontWeight: '600',
-  },
-  actionButtonsRow: {
-    flexDirection: 'row',
-    gap: 10,
-    marginTop: 8,
-    marginBottom: 6,
-  },
-  installNowButton: {
-    flex: 1,
-    backgroundColor: '#38bdf8',
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingVertical: 12,
-    borderRadius: 8,
-  },
-  installNowButtonText: {
-    color: '#090d16',
-    fontSize: 14,
-    fontWeight: '700',
-  },
-  retryActionButton: {
-    flex: 1,
-    backgroundColor: '#f8fafc',
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingVertical: 10,
-    borderRadius: 8,
-  },
-  retryActionButtonText: {
-    color: '#090d16',
-    fontSize: 13,
-    fontWeight: '700',
-  },
-  browserActionButton: {
-    flex: 1,
-    backgroundColor: '#1e293b',
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingVertical: 10,
-    borderRadius: 8,
     borderWidth: 1,
     borderColor: '#334155',
-  },
-  browserActionButtonText: {
-    color: '#f8fafc',
-    fontSize: 13,
-    fontWeight: '600',
-  },
-  laterLinkButton: {
-    alignItems: 'center',
-    justifyContent: 'center',
+    paddingHorizontal: 12,
     paddingVertical: 10,
-    marginTop: 4,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.4,
+    shadowRadius: 12,
+    elevation: 10,
   },
-  laterLinkText: {
-    color: '#64748b',
-    fontSize: 12,
-    fontWeight: '600',
-  },
-  footerContainer: {
-    marginTop: 24,
-    alignItems: 'center',
-  },
-  securityBadge: {
+  floatingUpdateHeader: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 6,
-    marginBottom: 6,
+    gap: 10,
   },
-  securityText: {
+  floatingUpdateIconBox: {
+    width: 32,
+    height: 32,
+    borderRadius: 10,
+    backgroundColor: 'rgba(56, 189, 248, 0.12)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  floatingUpdateTextBox: {
+    flex: 1,
+  },
+  floatingUpdateTitle: {
+    color: '#f8fafc',
+    fontSize: 12.5,
+    fontWeight: '700',
+  },
+  floatingUpdateSubtext: {
     color: '#94a3b8',
     fontSize: 11,
-    fontWeight: '600',
+    marginTop: 1,
   },
-  versionFooterText: {
-    color: '#475569',
-    fontSize: 10,
-    fontWeight: '500',
+  floatingActionBtn: {
+    backgroundColor: '#38bdf8',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 8,
+  },
+  floatingActionBtnText: {
+    color: '#090d16',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  floatingCloseBtn: {
+    padding: 5,
+    marginLeft: 2,
+  },
+  floatingProgressTrack: {
+    width: '100%',
+    height: 3,
+    backgroundColor: '#1e293b',
+    borderRadius: 2,
+    marginTop: 8,
+    overflow: 'hidden',
+  },
+  floatingProgressBar: {
+    height: '100%',
+    borderRadius: 2,
   },
 
   /* Offline Downloads & Player Styles */
