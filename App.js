@@ -382,6 +382,26 @@ export default function App() {
           key={`cinema-wv-${sessionKey}`}
           source={{ uri: DEFAULT_SERVER_URL }}
           style={styles.webView}
+          applicationNameForUserAgent="CinemaApp/1.0.4"
+          injectedJavaScriptBeforeContentLoaded={`
+            window.isCinemaNativeApp = true;
+            window.isCinemaApp = true;
+            true;
+          `}
+          injectedJavaScript={`
+            (function() {
+              try {
+                window.isCinemaNativeApp = true;
+                window.isCinemaApp = true;
+                const hideCss = '[data-app-hide="true"], button[aria-label*="APK"], button[title*="APK"] { display: none !important; }';
+                const style = document.createElement('style');
+                style.type = 'text/css';
+                style.appendChild(document.createTextNode(hideCss));
+                (document.head || document.documentElement).appendChild(style);
+              } catch(e) {}
+            })();
+            true;
+          `}
           allowsBackForwardNavigationGestures={true}
           pullToRefreshEnabled={true}
           allowsFullscreenVideo={true}
