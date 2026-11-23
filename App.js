@@ -31,7 +31,7 @@ const { width } = Dimensions.get('window');
 
 const STORAGE_KEY = '@cinema_server_url';
 const DEFAULT_SERVER_URL = 'http://169.40.116.114:8099';
-const CURRENT_APP_VERSION = '1.0.4';
+const CURRENT_APP_VERSION = '1.0.5';
 const OFFLINE_DOWNLOADS_KEY = '@cinema_offline_downloads_v1';
 const DOWNLOADS_DIR = `${FileSystem.documentDirectory}downloads/`;
 
@@ -734,7 +734,8 @@ export default function App() {
           key={`cinema-wv-${sessionKey}`}
           source={{ uri: DEFAULT_SERVER_URL }}
           style={styles.webView}
-          applicationNameForUserAgent="CinemaApp/1.0.4"
+          applicationNameForUserAgent="CinemaApp/1.0.5"
+          setSupportMultipleWindows={false}
           injectedJavaScriptBeforeContentLoaded={`
             window.isCinemaNativeApp = true;
             window.isCinemaApp = true;
@@ -750,6 +751,28 @@ export default function App() {
                 style.type = 'text/css';
                 style.appendChild(document.createTextNode(hideCss));
                 (document.head || document.documentElement).appendChild(style);
+
+                // Global capture-phase download interceptor: NEVER let clicks redirect to browser
+                document.addEventListener('click', function(e) {
+                  var target = e.target && e.target.closest ? e.target.closest('a') : null;
+                  if (!target) return;
+                  var href = target.getAttribute('href') || '';
+                  var isDownload = target.hasAttribute('download') || href.includes('/downloads/') || /\\.(mp4|mkv|avi|mov|webm)(\\?.*)?$/i.test(href);
+                  if (isDownload) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    if (window.ReactNativeWebView && window.ReactNativeWebView.postMessage) {
+                      window.ReactNativeWebView.postMessage(JSON.stringify({
+                        type: 'START_OFFLINE_DOWNLOAD',
+                        payload: {
+                          url: target.href || href,
+                          title: target.getAttribute('download') || target.innerText || 'Movie Media',
+                          resolution: 'HD'
+                        }
+                      }));
+                    }
+                  }
+                }, true);
               } catch(e) {}
             })();
             true;
@@ -764,6 +787,28 @@ export default function App() {
           thirdPartyCookiesEnabled={true}
           mixedContentMode="always"
           originWhitelist={['*']}
+          onShouldStartLoadWithRequest={(request) => {
+            const url = request.url;
+            if (!url) return false;
+
+            // Block external browser hijack on download / video links and handle in-app
+            if (url.includes('/downloads/') || url.includes('/api/proxy/stream') || /\\.(mp4|mkv|avi|mov|webm)(\\?.*)?$/i.test(url)) {
+              startOfflineDownload({
+                url,
+                title: 'Downloaded Media',
+                resolution: 'HD',
+              });
+              return false;
+            }
+
+            // Allow all requests on the cinema server or localhost
+            if (url.startsWith(DEFAULT_SERVER_URL) || url.startsWith('http://localhost') || url.startsWith('http://169.40.116.114')) {
+              return true;
+            }
+
+            // Prevent opening other domains externally unless explicitly desired
+            return false;
+          }}
           onMessage={handleWebViewMessage}
           onContentProcessDidTerminate={handleContentProcessDidTerminate}
           onNavigationStateChange={(navState) => {
