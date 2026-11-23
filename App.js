@@ -16,6 +16,9 @@ import {
   Animated,
   Easing,
   Dimensions,
+  Alert,
+  FlatList,
+  Image,
 } from 'react-native';
 import { WebView } from 'react-native-webview';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -29,6 +32,8 @@ const { width } = Dimensions.get('window');
 const STORAGE_KEY = '@cinema_server_url';
 const DEFAULT_SERVER_URL = 'http://169.40.116.114:8099';
 const CURRENT_APP_VERSION = '1.0.4';
+const OFFLINE_DOWNLOADS_KEY = '@cinema_offline_downloads_v1';
+const DOWNLOADS_DIR = `${FileSystem.documentDirectory}downloads/`;
 
 const isNewerVersion = (remoteVer, currentVer) => {
   if (!remoteVer || typeof remoteVer !== 'string') return false;
@@ -67,15 +72,25 @@ export default function App() {
   const [downloadedApkUri, setDownloadedApkUri] = useState(null);
   const [downloadError, setDownloadError] = useState(null);
 
+  // MovieBox-style Offline Downloader & Playback
+  const [downloads, setDownloads] = useState([]);
+  const [isDownloadsModalVisible, setIsDownloadsModalVisible] = useState(false);
+  const [downloadsTab, setDownloadsTab] = useState('completed'); // 'completed' | 'downloading'
+  const [storageInfo, setStorageInfo] = useState({ usedMB: '0.0', freeGB: '0.0' });
+  const [toastInfo, setToastInfo] = useState(null);
+
   const webViewRef = useRef(null);
   const canGoBackRef = useRef(false);
   const isUpdatingRef = useRef(false);
+  const isDownloadsModalVisibleRef = useRef(false);
   const downloadResumableRef = useRef(null);
+  const activeTasksRef = useRef({});
 
-  // Animation values for StockWhisk-style updating overlay
+  // Animation values for StockWhisk-style updating overlay & Downloader Toast
   const pulseAnim = useRef(new Animated.Value(1)).current;
   const spinAnim = useRef(new Animated.Value(0)).current;
   const progressAnim = useRef(new Animated.Value(0)).current;
+  const toastAnim = useRef(new Animated.Value(-100)).current;
 
   useEffect(() => {
     canGoBackRef.current = canGoBack;
@@ -84,6 +99,10 @@ export default function App() {
   useEffect(() => {
     isUpdatingRef.current = isUpdating;
   }, [isUpdating]);
+
+  useEffect(() => {
+    isDownloadsModalVisibleRef.current = isDownloadsModalVisible;
+  }, [isDownloadsModalVisible]);
 
   // Pulse animation loop
   useEffect(() => {
@@ -284,6 +303,10 @@ export default function App() {
         setIsUpdating(false);
         return true;
       }
+      if (isDownloadsModalVisibleRef.current) {
+        setIsDownloadsModalVisible(false);
+        return true;
+      }
       if (canGoBackRef.current && webViewRef.current) {
         webViewRef.current.goBack();
         return true;
@@ -313,6 +336,325 @@ export default function App() {
     }, 1200);
   }, [handleRetry]);
 
+  // Toast feedback helper
+  const showToast = useCallback((text, type = 'info') => {
+    setToastInfo({ text, type });
+    Animated.spring(toastAnim, {
+      toValue: 24,
+      useNativeDriver: true,
+      speed: 14,
+      bounciness: 4,
+    }).start();
+
+    setTimeout(() => {
+      Animated.timing(toastAnim, {
+        toValue: -100,
+        duration: 300,
+        useNativeDriver: true,
+      }).start(() => setToastInfo(null));
+    }, 3800);
+  }, [toastAnim]);
+
+  // Ensure downloads directory exists
+  const ensureDownloadsDirectory = async () => {
+    try {
+      const dirInfo = await FileSystem.getInfoAsync(DOWNLOADS_DIR);
+      if (!dirInfo.exists) {
+        await FileSystem.makeDirectoryAsync(DOWNLOADS_DIR, { intermediates: true });
+      }
+    } catch (e) {
+      console.warn('Error creating downloads directory:', e);
+    }
+  };
+
+  // Calculate downloaded media storage vs free disk space
+  const refreshStorageInfo = useCallback(async (currentDownloads) => {
+    try {
+      let usedBytes = 0;
+      const list = currentDownloads || downloads;
+      for (const item of list) {
+        if (item.status === 'completed' && item.fileSize) {
+          usedBytes += item.fileSize;
+        }
+      }
+      let freeBytes = 0;
+      try {
+        freeBytes = await FileSystem.getFreeDiskStorageAsync();
+      } catch (e) {
+        freeBytes = 15 * 1024 * 1024 * 1024;
+      }
+      setStorageInfo({
+        usedMB: (usedBytes / (1024 * 1024)).toFixed(1),
+        usedGB: (usedBytes / (1024 * 1024 * 1024)).toFixed(2),
+        freeGB: (freeBytes / (1024 * 1024 * 1024)).toFixed(1),
+      });
+    } catch (err) {
+      console.warn('Storage calculation error:', err);
+    }
+  }, [downloads]);
+
+  // Save downloads array to AsyncStorage
+  const saveDownloads = useCallback(async (newDownloads) => {
+    try {
+      setDownloads(newDownloads);
+      await AsyncStorage.setItem(OFFLINE_DOWNLOADS_KEY, JSON.stringify(newDownloads));
+      refreshStorageInfo(newDownloads);
+    } catch (e) {
+      console.warn('Error saving downloads to AsyncStorage:', e);
+    }
+  }, [refreshStorageInfo]);
+
+  // Load offline downloads on mount
+  useEffect(() => {
+    const initDownloads = async () => {
+      try {
+        await ensureDownloadsDirectory();
+        const stored = await AsyncStorage.getItem(OFFLINE_DOWNLOADS_KEY);
+        if (stored) {
+          const parsed = JSON.parse(stored);
+          setDownloads(parsed);
+          refreshStorageInfo(parsed);
+        }
+      } catch (err) {
+        console.warn('Failed to load offline downloads:', err);
+      }
+    };
+    initDownloads();
+  }, [refreshStorageInfo]);
+
+  // Start offline download with resumable progress tracking
+  const startOfflineDownload = useCallback(async (payload) => {
+    if (!payload || !payload.url) {
+      showToast('Download link is not available', 'error');
+      return;
+    }
+
+    await ensureDownloadsDirectory();
+
+    const id = payload.id || `dl_${Date.now()}`;
+    const safeTitle = (payload.title || 'media').replace(/[^a-zA-Z0-9_\-\.]/g, '_').substring(0, 40);
+    const fileName = `${safeTitle}_${payload.resolution || 'HD'}_${Date.now()}.mp4`;
+    const fileUri = `${DOWNLOADS_DIR}${fileName}`;
+
+    const newItem = {
+      id,
+      title: payload.title || 'Untitled',
+      subtitle: payload.subtitle || null,
+      poster: payload.poster || null,
+      url: payload.url,
+      resolution: payload.resolution || 'HD',
+      sizeText: payload.size || 'HD',
+      fileUri,
+      progress: 0,
+      downloadedBytes: 0,
+      totalBytes: 0,
+      speedText: 'Starting...',
+      status: 'downloading',
+      createdAt: Date.now(),
+    };
+
+    setDownloads((prev) => {
+      const updated = [newItem, ...prev.filter((d) => d.id !== id)];
+      AsyncStorage.setItem(OFFLINE_DOWNLOADS_KEY, JSON.stringify(updated)).catch(() => {});
+      return updated;
+    });
+
+    showToast(`Downloading: ${payload.title} (${payload.resolution || 'HD'})`, 'success');
+
+    let lastBytes = 0;
+    let lastTime = Date.now();
+
+    const callback = (downloadProgress) => {
+      const totalBytes = downloadProgress.totalBytesExpectedToWrite;
+      const writtenBytes = downloadProgress.totalBytesWritten;
+      const progress = totalBytes > 0 ? writtenBytes / totalBytes : 0;
+
+      const now = Date.now();
+      const timeDiff = (now - lastTime) / 1000;
+      if (timeDiff >= 0.5 || writtenBytes === totalBytes) {
+        const bytesDiff = writtenBytes - lastBytes;
+        const speedBps = timeDiff > 0 ? bytesDiff / timeDiff : 0;
+        let speedStr = '';
+        if (speedBps > 1024 * 1024) {
+          speedStr = `${(speedBps / (1024 * 1024)).toFixed(1)} MB/s`;
+        } else if (speedBps > 1024) {
+          speedStr = `${(speedBps / 1024).toFixed(0)} KB/s`;
+        } else {
+          speedStr = `${Math.round(speedBps)} B/s`;
+        }
+
+        lastBytes = writtenBytes;
+        lastTime = now;
+
+        setDownloads((prevList) =>
+          prevList.map((item) => {
+            if (item.id === id) {
+              return {
+                ...item,
+                progress,
+                downloadedBytes: writtenBytes,
+                totalBytes,
+                speedText: speedStr,
+              };
+            }
+            return item;
+          })
+        );
+      }
+    };
+
+    try {
+      const downloadResumable = FileSystem.createDownloadResumable(
+        payload.url,
+        fileUri,
+        {},
+        callback
+      );
+      activeTasksRef.current[id] = downloadResumable;
+
+      const result = await downloadResumable.downloadAsync();
+      delete activeTasksRef.current[id];
+
+      if (result && result.uri) {
+        const info = await FileSystem.getInfoAsync(result.uri);
+        setDownloads((prevList) => {
+          const finalDownloads = prevList.map((item) => {
+            if (item.id === id) {
+              return {
+                ...item,
+                status: 'completed',
+                progress: 1,
+                fileSize: info.size || 0,
+                speedText: '',
+              };
+            }
+            return item;
+          });
+          AsyncStorage.setItem(OFFLINE_DOWNLOADS_KEY, JSON.stringify(finalDownloads)).catch(() => {});
+          refreshStorageInfo(finalDownloads);
+          return finalDownloads;
+        });
+        showToast(`Finished: ${payload.title} saved offline!`, 'success');
+      }
+    } catch (err) {
+      delete activeTasksRef.current[id];
+      console.warn(`Download error for ${id}:`, err);
+      setDownloads((prevList) => {
+        const errList = prevList.map((item) =>
+          item.id === id ? { ...item, status: 'error', speedText: 'Error' } : item
+        );
+        AsyncStorage.setItem(OFFLINE_DOWNLOADS_KEY, JSON.stringify(errList)).catch(() => {});
+        return errList;
+      });
+      showToast(`Download failed: ${payload.title}`, 'error');
+    }
+  }, [showToast, refreshStorageInfo]);
+
+  const pauseDownload = useCallback(async (id) => {
+    const task = activeTasksRef.current[id];
+    if (task) {
+      try {
+        await task.pauseAsync();
+      } catch (e) {
+        console.warn('Pause error:', e);
+      }
+      delete activeTasksRef.current[id];
+    }
+    setDownloads((prev) => {
+      const updated = prev.map((d) => (d.id === id ? { ...d, status: 'paused', speedText: 'Paused' } : d));
+      AsyncStorage.setItem(OFFLINE_DOWNLOADS_KEY, JSON.stringify(updated)).catch(() => {});
+      return updated;
+    });
+  }, []);
+
+  const resumeDownload = useCallback((id) => {
+    const item = downloads.find((d) => d.id === id);
+    if (!item) return;
+    startOfflineDownload(item);
+  }, [downloads, startOfflineDownload]);
+
+  const cancelDownload = useCallback(async (id) => {
+    const task = activeTasksRef.current[id];
+    if (task) {
+      try {
+        await task.pauseAsync();
+      } catch (e) {}
+      delete activeTasksRef.current[id];
+    }
+    const item = downloads.find((d) => d.id === id);
+    if (item && item.fileUri) {
+      try {
+        await FileSystem.deleteAsync(item.fileUri, { idempotent: true });
+      } catch (e) {}
+    }
+    setDownloads((prev) => {
+      const updated = prev.filter((d) => d.id !== id);
+      AsyncStorage.setItem(OFFLINE_DOWNLOADS_KEY, JSON.stringify(updated)).catch(() => {});
+      refreshStorageInfo(updated);
+      return updated;
+    });
+    showToast('Download cancelled', 'info');
+  }, [downloads, showToast, refreshStorageInfo]);
+
+  const deleteDownload = useCallback((id) => {
+    const item = downloads.find((d) => d.id === id);
+    if (!item) return;
+
+    Alert.alert(
+      'Delete Download',
+      `Delete "${item.title}" from offline storage?`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: async () => {
+            if (item.fileUri) {
+              try {
+                await FileSystem.deleteAsync(item.fileUri, { idempotent: true });
+              } catch (err) {
+                console.warn('File delete error:', err);
+              }
+            }
+            setDownloads((prev) => {
+              const updated = prev.filter((d) => d.id !== id);
+              AsyncStorage.setItem(OFFLINE_DOWNLOADS_KEY, JSON.stringify(updated)).catch(() => {});
+              refreshStorageInfo(updated);
+              return updated;
+            });
+            showToast(`Deleted "${item.title}"`, 'info');
+          },
+        },
+      ]
+    );
+  }, [downloads, showToast, refreshStorageInfo]);
+
+  const playOfflineVideo = useCallback(async (item) => {
+    if (!item || !item.fileUri) {
+      Alert.alert('Error', 'Video file path is invalid.');
+      return;
+    }
+    try {
+      const fileInfo = await FileSystem.getInfoAsync(item.fileUri);
+      if (!fileInfo.exists) {
+        Alert.alert('File Not Found', 'This video file was removed or moved.');
+        return;
+      }
+      const contentUri = await FileSystem.getContentUriAsync(item.fileUri);
+      await IntentLauncher.startActivityAsync('android.intent.action.VIEW', {
+        data: contentUri,
+        type: 'video/*',
+        flags: 1, // FLAG_GRANT_READ_URI_PERMISSION
+      });
+    } catch (err) {
+      console.warn('Playback launch error:', err);
+      Alert.alert(
+        'Player Needed',
+        'Please ensure you have a media player installed (such as VLC, MX Player, or Google Photos) to play downloaded videos.'
+      );
+    }
+  }, []);
+
   const handleWebViewError = (syntheticEvent) => {
     console.warn('WebView error occurred:', syntheticEvent.nativeEvent);
     setHasError(true);
@@ -327,7 +669,7 @@ export default function App() {
     }
   };
 
-  // Bidirectional communication with web player for auto horizontal orientation
+  // Bidirectional communication with web player for auto horizontal orientation & offline downloads
   const handleWebViewMessage = useCallback((event) => {
     try {
       const data = event.nativeEvent.data;
@@ -341,11 +683,16 @@ export default function App() {
         } else if (msg.orientation === 'unlock') {
           ScreenOrientation.unlockAsync();
         }
+      } else if (msg && msg.type === 'START_OFFLINE_DOWNLOAD') {
+        startOfflineDownload(msg.payload);
+      } else if (msg && msg.type === 'OPEN_DOWNLOADS') {
+        setIsDownloadsModalVisible(true);
+        setDownloadsTab('completed');
       }
     } catch (err) {
       console.warn('WebView message error:', err);
     }
-  }, []);
+  }, [startOfflineDownload]);
 
   const handleContentProcessDidTerminate = useCallback(() => {
     if (webViewRef.current) {
@@ -366,6 +713,11 @@ export default function App() {
       </View>
     );
   }
+
+  const completedList = downloads.filter((d) => d.status === 'completed');
+  const downloadingList = downloads.filter((d) => d.status === 'downloading' || d.status === 'paused');
+  const activeDownloadsCount = downloadingList.length;
+  const completedDownloadsCount = completedList.length;
 
   return (
     <SafeAreaView style={styles.rootContainer}>
@@ -470,19 +822,88 @@ export default function App() {
               </View>
 
               <Text style={styles.errorHeading}>Server Offline</Text>
+              <Text style={styles.errorSubtext}>
+                No internet connection or server unreachable.
+              </Text>
 
-              <TouchableOpacity
-                style={styles.retryButton}
-                activeOpacity={0.85}
-                onPress={handleRetry}
-              >
-                <Feather name="refresh-cw" size={16} color="#090d16" style={{ marginRight: 8 }} />
-                <Text style={styles.retryButtonText}>Retry</Text>
-              </TouchableOpacity>
+              <View style={styles.offlineActionsWrapper}>
+                <TouchableOpacity
+                  style={styles.retryButton}
+                  activeOpacity={0.85}
+                  onPress={handleRetry}
+                >
+                  <Feather name="refresh-cw" size={16} color="#090d16" style={{ marginRight: 8 }} />
+                  <Text style={styles.retryButtonText}>Retry Connection</Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  style={styles.offlineLibraryButton}
+                  activeOpacity={0.85}
+                  onPress={() => {
+                    setIsDownloadsModalVisible(true);
+                    setDownloadsTab('completed');
+                  }}
+                >
+                  <Feather name="film" size={16} color="#38bdf8" style={{ marginRight: 8 }} />
+                  <Text style={styles.offlineLibraryButtonText}>
+                    Watch Offline Downloads ({completedDownloadsCount})
+                  </Text>
+                </TouchableOpacity>
+              </View>
             </ScrollView>
           </View>
         )}
+
+        {/* Floating Downloads Button */}
+        {!hasError && (
+          <TouchableOpacity
+            style={styles.floatingDownloadsBtn}
+            activeOpacity={0.85}
+            onPress={() => {
+              setIsDownloadsModalVisible(true);
+              setDownloadsTab(activeDownloadsCount > 0 ? 'downloading' : 'completed');
+            }}
+          >
+            <Feather name="download" size={20} color="#f8fafc" />
+            {activeDownloadsCount > 0 && (
+              <View style={styles.floatingBadge}>
+                <Text style={styles.floatingBadgeText}>{activeDownloadsCount}</Text>
+              </View>
+            )}
+          </TouchableOpacity>
+        )}
       </View>
+
+      {/* Offline Downloader Top Toast Banner */}
+      {toastInfo && (
+        <Animated.View
+          style={[
+            styles.toastContainer,
+            { transform: [{ translateY: toastAnim }] },
+            toastInfo.type === 'error' && styles.toastError,
+            toastInfo.type === 'success' && styles.toastSuccess,
+          ]}
+        >
+          <Feather
+            name={toastInfo.type === 'error' ? 'alert-circle' : toastInfo.type === 'success' ? 'check-circle' : 'info'}
+            size={18}
+            color="#fff"
+            style={{ marginRight: 8 }}
+          />
+          <Text style={styles.toastText} numberOfLines={2}>
+            {toastInfo.text}
+          </Text>
+          <TouchableOpacity
+            onPress={() => {
+              setIsDownloadsModalVisible(true);
+              setToastInfo(null);
+            }}
+            style={styles.toastActionBtn}
+          >
+            <Text style={styles.toastActionText}>VIEW</Text>
+          </TouchableOpacity>
+        </Animated.View>
+      )}
 
       {/* StockWhisk-style Animated Updating Overlay */}
       <Modal
@@ -624,6 +1045,237 @@ export default function App() {
             </View>
           </View>
         </View>
+      </Modal>
+
+      {/* MovieBox-style Offline Downloads Modal */}
+      <Modal
+        visible={isDownloadsModalVisible}
+        animationType="slide"
+        transparent={false}
+        onRequestClose={() => setIsDownloadsModalVisible(false)}
+      >
+        <SafeAreaView style={styles.dlModalContainer}>
+          <StatusBar barStyle="light-content" translucent={false} backgroundColor="#070a13" />
+
+          {/* Modal Header */}
+          <View style={styles.dlHeader}>
+            <View style={{ flex: 1 }}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                <Feather name="download" size={20} color="#38bdf8" />
+                <Text style={styles.dlHeaderTitle}>Offline Downloads</Text>
+              </View>
+              <Text style={styles.dlHeaderSubtitle}>Watch your movies & series without internet</Text>
+            </View>
+            <TouchableOpacity
+              style={styles.dlCloseBtn}
+              onPress={() => setIsDownloadsModalVisible(false)}
+              activeOpacity={0.7}
+            >
+              <Feather name="x" size={22} color="#94a3b8" />
+            </TouchableOpacity>
+          </View>
+
+          {/* Storage Meter Bar */}
+          <View style={styles.storageCard}>
+            <View style={styles.storageInfoRow}>
+              <View style={styles.storageLabelGroup}>
+                <Feather name="hard-drive" size={13} color="#38bdf8" />
+                <Text style={styles.storageLabel}>Device Storage</Text>
+              </View>
+              <Text style={styles.storageValues}>
+                Cinema: <Text style={{ color: '#38bdf8', fontWeight: 'bold' }}>{storageInfo.usedMB} MB</Text> • Free: {storageInfo.freeGB} GB
+              </Text>
+            </View>
+            <View style={styles.storageTrack}>
+              <View
+                style={[
+                  styles.storageBar,
+                  { width: `${Math.min(100, Math.max(3, (parseFloat(storageInfo.usedMB || '0') / (parseFloat(storageInfo.freeGB || '10') * 1024 + 1)) * 100))}%` },
+                ]}
+              />
+            </View>
+          </View>
+
+          {/* Segmented Tabs */}
+          <View style={styles.dlTabsRow}>
+            <TouchableOpacity
+              style={[styles.dlTab, downloadsTab === 'completed' && styles.dlTabActive]}
+              onPress={() => setDownloadsTab('completed')}
+              activeOpacity={0.8}
+            >
+              <Feather
+                name="check-circle"
+                size={15}
+                color={downloadsTab === 'completed' ? '#38bdf8' : '#64748b'}
+              />
+              <Text style={[styles.dlTabText, downloadsTab === 'completed' && styles.dlTabTextActive]}>
+                Downloaded ({completedList.length})
+              </Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={[styles.dlTab, downloadsTab === 'downloading' && styles.dlTabActive]}
+              onPress={() => setDownloadsTab('downloading')}
+              activeOpacity={0.8}
+            >
+              <Feather
+                name="arrow-down-circle"
+                size={15}
+                color={downloadsTab === 'downloading' ? '#38bdf8' : '#64748b'}
+              />
+              <Text style={[styles.dlTabText, downloadsTab === 'downloading' && styles.dlTabTextActive]}>
+                Downloading ({downloadingList.length})
+              </Text>
+            </TouchableOpacity>
+          </View>
+
+          {/* Tab Content */}
+          {downloadsTab === 'completed' ? (
+            completedList.length === 0 ? (
+              <View style={styles.emptyContainer}>
+                <View style={styles.emptyIconCircle}>
+                  <Feather name="film" size={36} color="#475569" />
+                </View>
+                <Text style={styles.emptyTitle}>No Downloaded Media</Text>
+                <Text style={styles.emptySubtitle}>
+                  Download movies and series to watch offline on flights, journeys, or when internet is slow.
+                </Text>
+              </View>
+            ) : (
+              <FlatList
+                data={completedList}
+                keyExtractor={(item) => item.id}
+                contentContainerStyle={styles.listContent}
+                renderItem={({ item }) => (
+                  <View style={styles.dlCard}>
+                    {item.poster ? (
+                      <Image source={{ uri: item.poster }} style={styles.dlPoster} />
+                    ) : (
+                      <View style={[styles.dlPoster, styles.dlPosterPlaceholder]}>
+                        <Feather name="film" size={24} color="#64748b" />
+                      </View>
+                    )}
+                    <View style={styles.dlCardInfo}>
+                      <Text style={styles.dlCardTitle} numberOfLines={1}>
+                        {item.title}
+                      </Text>
+                      {item.subtitle ? (
+                        <Text style={styles.dlCardSubtitle} numberOfLines={1}>
+                          {item.subtitle}
+                        </Text>
+                      ) : null}
+                      <View style={styles.dlBadgesRow}>
+                        <View style={styles.dlQualityBadge}>
+                          <Text style={styles.dlQualityText}>{item.resolution}</Text>
+                        </View>
+                        {item.fileSize ? (
+                          <Text style={styles.dlSizeText}>
+                            {(item.fileSize / (1024 * 1024)).toFixed(1)} MB
+                          </Text>
+                        ) : null}
+                      </View>
+
+                      <View style={styles.dlActionsRow}>
+                        <TouchableOpacity
+                          style={styles.playOfflineBtn}
+                          onPress={() => playOfflineVideo(item)}
+                          activeOpacity={0.8}
+                        >
+                          <Feather name="play" size={13} color="#090d16" style={{ marginRight: 4 }} />
+                          <Text style={styles.playOfflineBtnText}>PLAY</Text>
+                        </TouchableOpacity>
+
+                        <TouchableOpacity
+                          style={styles.deleteDlBtn}
+                          onPress={() => deleteDownload(item.id)}
+                          activeOpacity={0.7}
+                        >
+                          <Feather name="trash-2" size={15} color="#ef4444" />
+                        </TouchableOpacity>
+                      </View>
+                    </View>
+                  </View>
+                )}
+              />
+            )
+          ) : (
+            downloadingList.length === 0 ? (
+              <View style={styles.emptyContainer}>
+                <View style={styles.emptyIconCircle}>
+                  <Feather name="download-cloud" size={36} color="#475569" />
+                </View>
+                <Text style={styles.emptyTitle}>No Active Downloads</Text>
+                <Text style={styles.emptySubtitle}>
+                  Choose any movie or series and tap Download to save for offline viewing.
+                </Text>
+              </View>
+            ) : (
+              <FlatList
+                data={downloadingList}
+                keyExtractor={(item) => item.id}
+                contentContainerStyle={styles.listContent}
+                renderItem={({ item }) => {
+                  const percent = Math.round((item.progress || 0) * 100);
+                  const isPaused = item.status === 'paused';
+                  return (
+                    <View style={styles.dlCard}>
+                      <View style={styles.dlCardInfo}>
+                        <View style={styles.dlDownloadingHeader}>
+                          <Text style={styles.dlCardTitle} numberOfLines={1}>
+                            {item.title}
+                          </Text>
+                          <View style={styles.dlQualityBadge}>
+                            <Text style={styles.dlQualityText}>{item.resolution}</Text>
+                          </View>
+                        </View>
+
+                        {/* Progress Bar */}
+                        <View style={styles.progressBarTrack}>
+                          <View
+                            style={[
+                              styles.progressBarFill,
+                              { width: `${Math.max(2, Math.min(100, percent))}%` },
+                              isPaused && { backgroundColor: '#eab308' },
+                            ]}
+                          />
+                        </View>
+
+                        {/* Progress Meta */}
+                        <View style={styles.progressMetaRow}>
+                          <Text style={styles.progressPercentText}>{percent}%</Text>
+                          <Text style={styles.progressSpeedText}>
+                            {isPaused ? 'Paused' : item.speedText || 'Downloading...'}
+                          </Text>
+                        </View>
+
+                        {/* Controls */}
+                        <View style={styles.dlControlsRow}>
+                          <TouchableOpacity
+                            style={styles.controlPillBtn}
+                            onPress={() => (isPaused ? resumeDownload(item.id) : pauseDownload(item.id))}
+                            activeOpacity={0.8}
+                          >
+                            <Feather name={isPaused ? 'play' : 'pause'} size={13} color="#38bdf8" />
+                            <Text style={styles.controlPillText}>{isPaused ? 'Resume' : 'Pause'}</Text>
+                          </TouchableOpacity>
+
+                          <TouchableOpacity
+                            style={[styles.controlPillBtn, { borderColor: '#ef444440' }]}
+                            onPress={() => cancelDownload(item.id)}
+                            activeOpacity={0.8}
+                          >
+                            <Feather name="x" size={13} color="#ef4444" />
+                            <Text style={[styles.controlPillText, { color: '#ef4444' }]}>Cancel</Text>
+                          </TouchableOpacity>
+                        </View>
+                      </View>
+                    </View>
+                  );
+                }}
+              />
+            )
+          )}
+        </SafeAreaView>
       </Modal>
     </SafeAreaView>
   );
@@ -991,5 +1643,384 @@ const styles = StyleSheet.create({
     color: '#475569',
     fontSize: 10,
     fontWeight: '500',
+  },
+
+  /* Offline Downloads & Player Styles */
+  offlineActionsWrapper: {
+    width: '100%',
+    gap: 10,
+    marginTop: 8,
+  },
+  offlineLibraryButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#0f172a',
+    borderWidth: 1,
+    borderColor: '#0284c7',
+    paddingVertical: 12,
+    paddingHorizontal: 20,
+    borderRadius: 12,
+    shadowColor: '#0284c7',
+    shadowOpacity: 0.2,
+    shadowRadius: 8,
+    elevation: 3,
+  },
+  offlineLibraryButtonText: {
+    color: '#38bdf8',
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  floatingDownloadsBtn: {
+    position: 'absolute',
+    bottom: 24,
+    right: 20,
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    backgroundColor: '#0284c7',
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.4,
+    shadowRadius: 6,
+    elevation: 6,
+    borderWidth: 1,
+    borderColor: '#38bdf8',
+  },
+  floatingBadge: {
+    position: 'absolute',
+    top: -4,
+    right: -4,
+    backgroundColor: '#ef4444',
+    minWidth: 18,
+    height: 18,
+    borderRadius: 9,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 4,
+  },
+  floatingBadgeText: {
+    color: '#fff',
+    fontSize: 10,
+    fontWeight: 'bold',
+  },
+  toastContainer: {
+    position: 'absolute',
+    top: Platform.OS === 'android' ? 36 : 50,
+    left: 16,
+    right: 16,
+    backgroundColor: '#1e293b',
+    borderWidth: 1,
+    borderColor: '#334155',
+    borderRadius: 12,
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    flexDirection: 'row',
+    alignItems: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.5,
+    shadowRadius: 10,
+    elevation: 10,
+    zIndex: 999,
+  },
+  toastError: {
+    borderColor: '#ef444460',
+    backgroundColor: '#1c1917',
+  },
+  toastSuccess: {
+    borderColor: '#10b98160',
+    backgroundColor: '#06281e',
+  },
+  toastText: {
+    flex: 1,
+    color: '#f8fafc',
+    fontSize: 13,
+    fontWeight: '500',
+  },
+  toastActionBtn: {
+    marginLeft: 8,
+    paddingVertical: 4,
+    paddingHorizontal: 8,
+    backgroundColor: '#38bdf820',
+    borderRadius: 6,
+  },
+  toastActionText: {
+    color: '#38bdf8',
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  dlModalContainer: {
+    flex: 1,
+    backgroundColor: '#070a13',
+  },
+  dlHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 16,
+    paddingVertical: 14,
+    borderBottomWidth: 1,
+    borderBottomColor: '#1e293b',
+  },
+  dlHeaderTitle: {
+    color: '#f8fafc',
+    fontSize: 18,
+    fontWeight: '800',
+    letterSpacing: 0.3,
+  },
+  dlHeaderSubtitle: {
+    color: '#94a3b8',
+    fontSize: 11,
+    marginTop: 2,
+  },
+  dlCloseBtn: {
+    padding: 6,
+    borderRadius: 8,
+    backgroundColor: '#1e293b',
+  },
+  storageCard: {
+    marginHorizontal: 16,
+    marginTop: 12,
+    marginBottom: 8,
+    padding: 12,
+    borderRadius: 10,
+    backgroundColor: '#0f172a',
+    borderWidth: 1,
+    borderColor: '#1e293b',
+  },
+  storageInfoRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 8,
+  },
+  storageLabelGroup: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  storageLabel: {
+    color: '#94a3b8',
+    fontSize: 11,
+    fontWeight: '600',
+  },
+  storageValues: {
+    color: '#64748b',
+    fontSize: 11,
+  },
+  storageTrack: {
+    height: 4,
+    backgroundColor: '#1e293b',
+    borderRadius: 2,
+    overflow: 'hidden',
+  },
+  storageBar: {
+    height: 4,
+    backgroundColor: '#38bdf8',
+    borderRadius: 2,
+  },
+  dlTabsRow: {
+    flexDirection: 'row',
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    gap: 8,
+  },
+  dlTab: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    paddingVertical: 10,
+    borderRadius: 8,
+    backgroundColor: '#0f172a',
+    borderWidth: 1,
+    borderColor: '#1e293b',
+  },
+  dlTabActive: {
+    borderColor: '#0284c7',
+    backgroundColor: '#0284c715',
+  },
+  dlTabText: {
+    color: '#64748b',
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  dlTabTextActive: {
+    color: '#38bdf8',
+    fontWeight: '700',
+  },
+  listContent: {
+    padding: 16,
+    gap: 12,
+  },
+  dlCard: {
+    flexDirection: 'row',
+    backgroundColor: '#0f172a',
+    borderRadius: 12,
+    padding: 12,
+    borderWidth: 1,
+    borderColor: '#1e293b',
+    gap: 12,
+  },
+  dlPoster: {
+    width: 64,
+    height: 90,
+    borderRadius: 8,
+    backgroundColor: '#1e293b',
+  },
+  dlPosterPlaceholder: {
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  dlCardInfo: {
+    flex: 1,
+    justifyContent: 'center',
+  },
+  dlCardTitle: {
+    color: '#f8fafc',
+    fontSize: 14,
+    fontWeight: '700',
+    marginBottom: 2,
+  },
+  dlCardSubtitle: {
+    color: '#94a3b8',
+    fontSize: 11,
+    marginBottom: 6,
+  },
+  dlBadgesRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginBottom: 10,
+  },
+  dlQualityBadge: {
+    backgroundColor: '#10b98120',
+    borderColor: '#10b98140',
+    borderWidth: 1,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
+  },
+  dlQualityText: {
+    color: '#10b981',
+    fontSize: 10,
+    fontWeight: 'bold',
+  },
+  dlSizeText: {
+    color: '#64748b',
+    fontSize: 11,
+    fontFamily: Platform.OS === 'android' ? 'monospace' : 'Courier',
+  },
+  dlActionsRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  playOfflineBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#38bdf8',
+    paddingVertical: 6,
+    paddingHorizontal: 16,
+    borderRadius: 6,
+  },
+  playOfflineBtnText: {
+    color: '#090d16',
+    fontSize: 12,
+    fontWeight: '800',
+  },
+  deleteDlBtn: {
+    padding: 6,
+    borderRadius: 6,
+    backgroundColor: '#ef444415',
+  },
+  dlDownloadingHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 8,
+  },
+  progressBarTrack: {
+    height: 6,
+    backgroundColor: '#1e293b',
+    borderRadius: 3,
+    overflow: 'hidden',
+    marginBottom: 6,
+  },
+  progressBarFill: {
+    height: 6,
+    backgroundColor: '#38bdf8',
+    borderRadius: 3,
+  },
+  progressMetaRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 8,
+  },
+  progressPercentText: {
+    color: '#38bdf8',
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  progressSpeedText: {
+    color: '#94a3b8',
+    fontSize: 11,
+  },
+  dlControlsRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  controlPillBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingVertical: 5,
+    paddingHorizontal: 12,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: '#38bdf840',
+    backgroundColor: '#0284c715',
+  },
+  controlPillText: {
+    color: '#38bdf8',
+    fontSize: 11,
+    fontWeight: '600',
+  },
+  emptyContainer: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 32,
+    marginTop: 60,
+  },
+  emptyIconCircle: {
+    width: 72,
+    height: 72,
+    borderRadius: 36,
+    backgroundColor: '#0f172a',
+    borderWidth: 1,
+    borderColor: '#1e293b',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 16,
+  },
+  emptyTitle: {
+    color: '#f8fafc',
+    fontSize: 16,
+    fontWeight: '700',
+    marginBottom: 6,
+  },
+  emptySubtitle: {
+    color: '#64748b',
+    fontSize: 12,
+    textAlign: 'center',
+    lineHeight: 18,
+    maxWidth: 260,
   },
 });
