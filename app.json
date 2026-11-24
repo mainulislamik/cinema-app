@@ -25,6 +25,15 @@
         "REQUEST_INSTALL_PACKAGES"
       ]
     },
+    "updates": {
+      "enabled": true,
+      "checkAutomatically": "ON_LOAD",
+      "fallbackToCacheTimeout": 0,
+      "url": "https://u.expo.dev/5edbe0f6-4161-4be1-9f14-05af771423f8"
+    },
+    "runtimeVersion": {
+      "policy": "appVersion"
+    },
     "extra": {
       "defaultApiUrl": "http://169.40.116.114:8099",
       "offlineFallback": true,

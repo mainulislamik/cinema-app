@@ -27,6 +27,7 @@ import { Feather } from '@expo/vector-icons';
 import * as ScreenOrientation from 'expo-screen-orientation';
 import * as FileSystem from 'expo-file-system';
 import * as IntentLauncher from 'expo-intent-launcher';
+import * as Updates from 'expo-updates';
 
 const { width } = Dimensions.get('window');
 
@@ -279,6 +280,23 @@ export default function App() {
   }, [toastAnim]);
 
   const checkForUpdates = useCallback(async (isManual = false) => {
+    // 1. Try Expo Over-The-Air (OTA) Updates first (seamless without prompt)
+    if (!__DEV__ && Updates.isEnabled) {
+      try {
+        const update = await Updates.checkForUpdateAsync();
+        if (update.isAvailable) {
+          showToast('Downloading update...', 'info');
+          await Updates.fetchUpdateAsync();
+          showToast('Applying update...', 'info');
+          await Updates.reloadAsync();
+          return;
+        }
+      } catch (otaErr) {
+        console.warn('Expo OTA update check error:', otaErr);
+      }
+    }
+
+    // 2. Fallback to API / APK check
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 6000);
 
@@ -309,7 +327,7 @@ export default function App() {
         showToast('Network error while checking updates', 'error');
       }
     }
-  }, [showToast]);
+  }, [showToast, startDownload]);
 
   // Ensure app always points to DEFAULT_SERVER_URL and lock portrait orientation on root
   useEffect(() => {
