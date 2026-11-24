@@ -22,3 +22,12 @@ eas build --platform android --profile production --local --output="$OUTPUT" --n
 
 echo "✅ Local APK build finished successfully!"
 echo "📁 Saved to: $OUTPUT"
+
+# Auto-sync to moviebox-web downloads for in-app auto updates
+WEB_DL_DIR="/home/imon/moviebox-web/frontend/public/downloads"
+if [ -d "$WEB_DL_DIR" ]; then
+    echo "🔄 Syncing new APK to $WEB_DL_DIR..."
+    cp -f "$OUTPUT" "$WEB_DL_DIR/cinema.apk"
+    cp -f "$OUTPUT" "$WEB_DL_DIR/moviebox.apk"
+    echo "✅ Auto-update distribution ready at $WEB_DL_DIR"
+fi
