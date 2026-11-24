@@ -2,7 +2,7 @@
   "expo": {
     "name": "Cinema",
     "slug": "cinema",
-    "version": "1.0.4",
+    "version": "1.0.5",
     "orientation": "default",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "dark",
@@ -12,6 +12,7 @@
     },
     "android": {
       "versionCode": 5,
+      "allowBackup": false,
       "adaptiveIcon": {
         "foregroundImage": "./assets/android-icon-foreground.png",
         "backgroundColor": "#020617"

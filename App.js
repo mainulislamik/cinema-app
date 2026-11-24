@@ -85,6 +85,8 @@ export default function App() {
   const isDownloadsModalVisibleRef = useRef(false);
   const downloadResumableRef = useRef(null);
   const activeTasksRef = useRef({});
+  const hasInitialLoadedRef = useRef(false);
+  const lastBackPressRef = useRef(0);
 
   // Animation values for StockWhisk-style updating overlay & Downloader Toast
   const pulseAnim = useRef(new Animated.Value(1)).current;
@@ -296,47 +298,6 @@ export default function App() {
     initServerUrl();
   }, [checkForUpdates]);
 
-  // Hardware back button support
-  useEffect(() => {
-    const onBackPress = () => {
-      if (isUpdatingRef.current) {
-        // Dismiss updating overlay on back press if completed or error
-        setIsUpdating(false);
-        return true;
-      }
-      if (isDownloadsModalVisibleRef.current) {
-        setIsDownloadsModalVisible(false);
-        return true;
-      }
-      if (canGoBackRef.current && webViewRef.current) {
-        webViewRef.current.goBack();
-        return true;
-      }
-      return false;
-    };
-
-    const backSubscription = BackHandler.addEventListener(
-      'hardwareBackPress',
-      onBackPress
-    );
-
-    return () => backSubscription.remove();
-  }, []);
-
-  const handleRetry = useCallback(() => {
-    setHasError(false);
-    setIsLoading(true);
-    setSessionKey((prev) => prev + 1);
-  }, []);
-
-  const handleRefresh = useCallback(() => {
-    setIsRefreshing(true);
-    handleRetry();
-    setTimeout(() => {
-      setIsRefreshing(false);
-    }, 1200);
-  }, [handleRetry]);
-
   // Toast feedback helper
   const showToast = useCallback((text, type = 'info') => {
     setToastInfo({ text, type });
@@ -355,6 +316,56 @@ export default function App() {
       }).start(() => setToastInfo(null));
     }, 3800);
   }, [toastAnim]);
+
+  // Hardware back button support with double-tap exit
+  useEffect(() => {
+    const onBackPress = () => {
+      if (isUpdatingRef.current) {
+        // Dismiss updating overlay on back press if completed or error
+        setIsUpdating(false);
+        return true;
+      }
+      if (isDownloadsModalVisibleRef.current) {
+        setIsDownloadsModalVisible(false);
+        return true;
+      }
+      if (canGoBackRef.current && webViewRef.current) {
+        webViewRef.current.goBack();
+        return true;
+      }
+
+      const now = Date.now();
+      if (now - lastBackPressRef.current < 2000) {
+        BackHandler.exitApp();
+        return true;
+      }
+      lastBackPressRef.current = now;
+      showToast('Press back again to exit', 'info');
+      return true;
+    };
+
+    const backSubscription = BackHandler.addEventListener(
+      'hardwareBackPress',
+      onBackPress
+    );
+
+    return () => backSubscription.remove();
+  }, [showToast]);
+
+  const handleRetry = useCallback(() => {
+    setHasError(false);
+    setIsLoading(true);
+    hasInitialLoadedRef.current = false;
+    setSessionKey((prev) => prev + 1);
+  }, []);
+
+  const handleRefresh = useCallback(() => {
+    setIsRefreshing(true);
+    handleRetry();
+    setTimeout(() => {
+      setIsRefreshing(false);
+    }, 1200);
+  }, [handleRetry]);
 
   // Ensure downloads directory exists
   const ensureDownloadsDirectory = async () => {
@@ -434,8 +445,7 @@ export default function App() {
 
     const id = payload.id || `dl_${Date.now()}`;
     const safeTitle = (payload.title || 'media').replace(/[^a-zA-Z0-9_\-\.]/g, '_').substring(0, 40);
-    const fileName = `${safeTitle}_${payload.resolution || 'HD'}_${Date.now()}.mp4`;
-    const fileUri = `${DOWNLOADS_DIR}${fileName}`;
+    const fileUri = payload.fileUri || `${DOWNLOADS_DIR}${safeTitle}_${payload.resolution || 'HD'}_${Date.now()}.mp4`;
 
     const newItem = {
       id,
@@ -446,12 +456,12 @@ export default function App() {
       resolution: payload.resolution || 'HD',
       sizeText: payload.size || 'HD',
       fileUri,
-      progress: 0,
-      downloadedBytes: 0,
-      totalBytes: 0,
+      progress: payload.progress || 0,
+      downloadedBytes: payload.downloadedBytes || 0,
+      totalBytes: payload.totalBytes || 0,
       speedText: 'Starting...',
       status: 'downloading',
-      createdAt: Date.now(),
+      createdAt: payload.createdAt || Date.now(),
     };
 
     setDownloads((prev) => {
@@ -568,9 +578,23 @@ export default function App() {
     });
   }, []);
 
-  const resumeDownload = useCallback((id) => {
+  const resumeDownload = useCallback(async (id) => {
     const item = downloads.find((d) => d.id === id);
     if (!item) return;
+
+    const existingTask = activeTasksRef.current[id];
+    if (existingTask) {
+      try {
+        await existingTask.resumeAsync();
+        setDownloads((prev) =>
+          prev.map((d) => (d.id === id ? { ...d, status: 'downloading', speedText: 'Resuming...' } : d))
+        );
+        return;
+      } catch (e) {
+        console.warn('Direct resume failed, restarting with same file:', e);
+      }
+    }
+
     startOfflineDownload(item);
   }, [downloads, startOfflineDownload]);
 
@@ -663,10 +687,15 @@ export default function App() {
   };
 
   const handleHttpError = (syntheticEvent) => {
-    if (syntheticEvent.nativeEvent.statusCode >= 400) {
-      console.warn('WebView HTTP error:', syntheticEvent.nativeEvent.statusCode);
+    const { statusCode, url } = syntheticEvent.nativeEvent;
+    // Sub-resources like 404 images, posters, favicon, subtitle files should NOT crash the app
+    const isMainDoc = !url || url === serverUrl || url === `${serverUrl}/` || url.startsWith(`${serverUrl}/?`) || url.startsWith(`${serverUrl}/#`);
+    if (statusCode >= 400 && isMainDoc) {
+      console.warn('WebView Main Document HTTP error:', statusCode, url);
       setHasError(true);
       setIsLoading(false);
+    } else {
+      console.warn('WebView Subresource HTTP error (ignored):', statusCode, url);
     }
   };
 
@@ -804,22 +833,22 @@ export default function App() {
             const url = request.url;
             if (!url) return false;
 
-            // Block external browser hijack on download / video links and handle in-app
-            if (url.includes('/downloads/') || url.includes('/api/proxy/stream') || /\\.(mp4|mkv|avi|mov|webm)(\\?.*)?$/i.test(url)) {
-              startOfflineDownload({
-                url,
-                title: 'Downloaded Media',
-                resolution: 'HD',
-              });
+            // Handle custom schemes or intents safely
+            if (url.startsWith('tel:') || url.startsWith('mailto:') || url.startsWith('intent:')) {
+              Linking.openURL(url).catch(() => {});
               return false;
             }
 
-            // Allow all requests on the cinema server or localhost
-            if (url.startsWith(DEFAULT_SERVER_URL) || url.startsWith('http://localhost') || url.startsWith('http://169.40.116.114')) {
+            // Direct file download links triggered via browser navigation
+            if (url.includes('/downloads/') && url.endsWith('.apk')) {
               return true;
             }
 
-            // Prevent opening other domains externally unless explicitly desired
+            // Allow all http and https requests (covers app server, CDNs, BDIX mirrors, embeds, streams)
+            if (url.startsWith('http://') || url.startsWith('https://')) {
+              return true;
+            }
+
             return false;
           }}
           onMessage={handleWebViewMessage}
@@ -828,11 +857,12 @@ export default function App() {
             setCanGoBack(navState.canGoBack);
           }}
           onLoadStart={() => {
-            if (!isRefreshing) {
+            if (!hasInitialLoadedRef.current && !isRefreshing) {
               setIsLoading(true);
             }
           }}
           onLoadEnd={() => {
+            hasInitialLoadedRef.current = true;
             setIsLoading(false);
           }}
           onError={handleWebViewError}
