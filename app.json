@@ -11,7 +11,7 @@
       "bundleIdentifier": "com.imon.cinema"
     },
     "android": {
-      "versionCode": 5,
+      "versionCode": 6,
       "allowBackup": false,
       "adaptiveIcon": {
         "foregroundImage": "./assets/android-icon-foreground.png",
