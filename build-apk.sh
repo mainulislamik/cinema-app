@@ -9,6 +9,12 @@ export ANDROID_HOME="/home/imon/Android/Sdk"
 export ANDROID_SDK_ROOT="/home/imon/Android/Sdk"
 export ANDROID_NDK_HOME="/home/imon/Android/Sdk/ndk/27.1.12297006"
 export PATH="$JAVA_HOME/bin:$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:/home/imon/.npm-global/bin:$PATH"
+if [ -f "/home/imon/.bashrc" ]; then
+    EXPO_LINE=$(grep "^export EXPO_TOKEN=" /home/imon/.bashrc | tail -n 1)
+    if [ -n "$EXPO_LINE" ]; then
+        eval "$EXPO_LINE"
+    fi
+fi
 export EXPO_TOKEN="${EXPO_TOKEN:-}"
 
 OUTPUT="${1:-$DIR/cinema.apk}"
