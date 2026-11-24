@@ -795,7 +795,6 @@ export default function App() {
 
   const completedList = downloads.filter((d) => d.status === 'completed');
   const downloadingList = downloads.filter((d) => d.status === 'downloading' || d.status === 'paused');
-  const activeDownloadsCount = downloadingList.length;
   const completedDownloadsCount = completedList.length;
 
   return (
@@ -979,23 +978,6 @@ export default function App() {
               </View>
             </ScrollView>
           </View>
-        )}
-
-        {/* Floating Downloads Button - Only show when there are active background downloads */}
-        {!hasError && activeDownloadsCount > 0 && (
-          <TouchableOpacity
-            style={styles.floatingDownloadsBtn}
-            activeOpacity={0.85}
-            onPress={() => {
-              setIsDownloadsModalVisible(true);
-              setDownloadsTab('downloading');
-            }}
-          >
-            <Feather name="download" size={20} color="#f8fafc" />
-            <View style={styles.floatingBadge}>
-              <Text style={styles.floatingBadgeText}>{activeDownloadsCount}</Text>
-            </View>
-          </TouchableOpacity>
         )}
       </View>
 
@@ -1576,41 +1558,6 @@ const styles = StyleSheet.create({
     color: '#38bdf8',
     fontSize: 14,
     fontWeight: '700',
-  },
-  floatingDownloadsBtn: {
-    position: 'absolute',
-    bottom: 24,
-    right: 20,
-    width: 48,
-    height: 48,
-    borderRadius: 24,
-    backgroundColor: '#0284c7',
-    alignItems: 'center',
-    justifyContent: 'center',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.4,
-    shadowRadius: 6,
-    elevation: 6,
-    borderWidth: 1,
-    borderColor: '#38bdf8',
-  },
-  floatingBadge: {
-    position: 'absolute',
-    top: -4,
-    right: -4,
-    backgroundColor: '#ef4444',
-    minWidth: 18,
-    height: 18,
-    borderRadius: 9,
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingHorizontal: 4,
-  },
-  floatingBadgeText: {
-    color: '#fff',
-    fontSize: 10,
-    fontWeight: 'bold',
   },
   toastContainer: {
     position: 'absolute',
