@@ -222,25 +222,34 @@ export default function App() {
         }
       } catch (_) {}
 
-      const downloadResumable = FileSystem.createDownloadResumable(
-        apkUrl,
-        localApkPath,
-        {},
-        (downloadProgress) => {
-          const total = downloadProgress.totalBytesExpectedToWrite;
-          const written = downloadProgress.totalBytesWritten;
-          if (total > 0) {
-            const percent = Math.min(100, Math.max(0, Math.round((written / total) * 100)));
-            setUpdateProgress(percent);
-            const writtenMB = (written / (1024 * 1024)).toFixed(1);
-            const totalMB = (total / (1024 * 1024)).toFixed(1);
-            setDownloadedSizeText(`${writtenMB} MB / ${totalMB} MB`);
-          }
+      let result;
+      try {
+        if (typeof FileSystem.createDownloadResumable === 'function') {
+          const downloadResumable = FileSystem.createDownloadResumable(
+            apkUrl,
+            localApkPath,
+            {},
+            (downloadProgress) => {
+              const total = downloadProgress.totalBytesExpectedToWrite;
+              const written = downloadProgress.totalBytesWritten;
+              if (total > 0) {
+                const percent = Math.min(100, Math.max(0, Math.round((written / total) * 100)));
+                setUpdateProgress(percent);
+                const writtenMB = (written / (1024 * 1024)).toFixed(1);
+                const totalMB = (total / (1024 * 1024)).toFixed(1);
+                setDownloadedSizeText(`${writtenMB} MB / ${totalMB} MB`);
+              }
+            }
+          );
+          downloadResumableRef.current = downloadResumable;
+          result = await downloadResumable.downloadAsync();
+        } else {
+          result = await FileSystem.downloadAsync(apkUrl, localApkPath);
         }
-      );
-
-      downloadResumableRef.current = downloadResumable;
-      const result = await downloadResumable.downloadAsync();
+      } catch (dlErr) {
+        console.warn('createDownloadResumable failed, trying direct downloadAsync:', dlErr);
+        result = await FileSystem.downloadAsync(apkUrl, localApkPath);
+      }
 
       if (result && result.uri) {
         setDownloadedApkUri(result.uri);
