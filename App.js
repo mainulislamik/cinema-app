@@ -174,9 +174,10 @@ export default function App() {
 
       if (Platform.OS === 'android') {
         const contentUri = await FileSystem.getContentUriAsync(apkFileUri);
+        // flags: FLAG_GRANT_READ_URI_PERMISSION (1) | FLAG_ACTIVITY_NEW_TASK (268435456 / 0x10000000)
         await IntentLauncher.startActivityAsync('android.intent.action.VIEW', {
           data: contentUri,
-          flags: 1, // FLAG_GRANT_READ_URI_PERMISSION
+          flags: 268435457,
           type: 'application/vnd.android.package-archive',
         });
         setUpdateStatusText('System package installer launched. Please confirm.');
@@ -186,9 +187,19 @@ export default function App() {
       }
     } catch (err) {
       console.warn('Install launcher error:', err);
-      setUpdateStatusText('Could not launch package installer.');
-      setUpdateState('error');
-      setDownloadError(err.message || 'Could not open installation dialog');
+      // Fallback: If IntentLauncher fails or is blocked on this device, open the direct APK URL in browser
+      try {
+        const downloadPath = (updateInfo && updateInfo.download_url) || '/downloads/cinema.apk';
+        const browserUrl = downloadPath.startsWith('http')
+          ? downloadPath
+          : `${DEFAULT_SERVER_URL.replace(/\/+$/, '')}/${downloadPath.replace(/^\/+/, '')}`;
+        await Linking.openURL(browserUrl);
+        setUpdateStatusText('Opening direct download link in browser...');
+      } catch (linkErr) {
+        setUpdateStatusText('Could not launch package installer.');
+        setUpdateState('error');
+        setDownloadError(err.message || 'Could not open installation dialog');
+      }
     }
   };
 
@@ -1066,13 +1077,28 @@ export default function App() {
                 </TouchableOpacity>
               )}
               {updateState === 'error' && (
-                <TouchableOpacity
-                  style={[styles.floatingActionBtn, { backgroundColor: '#f59e0b' }]}
-                  activeOpacity={0.8}
-                  onPress={() => startDownload(updateInfo)}
-                >
-                  <Text style={styles.floatingActionBtnText}>Retry</Text>
-                </TouchableOpacity>
+                <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                  <TouchableOpacity
+                    style={[styles.floatingActionBtn, { backgroundColor: '#f59e0b', marginRight: 6 }]}
+                    activeOpacity={0.8}
+                    onPress={() => startDownload(updateInfo)}
+                  >
+                    <Text style={styles.floatingActionBtnText}>Retry</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={[styles.floatingActionBtn, { backgroundColor: '#3b82f6' }]}
+                    activeOpacity={0.8}
+                    onPress={() => {
+                      const downloadPath = (updateInfo && updateInfo.download_url) || '/downloads/cinema.apk';
+                      const browserUrl = downloadPath.startsWith('http')
+                        ? downloadPath
+                        : `${DEFAULT_SERVER_URL.replace(/\/+$/, '')}/${downloadPath.replace(/^\/+/, '')}`;
+                      Linking.openURL(browserUrl).catch(() => {});
+                    }}
+                  >
+                    <Text style={styles.floatingActionBtnText}>Browser</Text>
+                  </TouchableOpacity>
+                </View>
               )}
               <TouchableOpacity
                 style={styles.floatingCloseBtn}
