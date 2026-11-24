@@ -85,6 +85,7 @@ export default function App() {
   const canGoBackRef = useRef(false);
   const isUpdatingRef = useRef(false);
   const isDownloadsModalVisibleRef = useRef(false);
+  const isWebModalOpenRef = useRef(false);
   const downloadResumableRef = useRef(null);
   const activeTasksRef = useRef({});
   const hasInitialLoadedRef = useRef(false);
@@ -386,6 +387,12 @@ export default function App() {
       }
       if (isDownloadsModalVisibleRef.current) {
         setIsDownloadsModalVisible(false);
+        return true;
+      }
+      if (isWebModalOpenRef.current && webViewRef.current) {
+        webViewRef.current.injectJavaScript(
+          "if (window.history.length > 1) { window.history.back(); } else { window.dispatchEvent(new CustomEvent('cinema:hardwareBack')); } true;"
+        );
         return true;
       }
       if (canGoBackRef.current && webViewRef.current) {
@@ -772,6 +779,8 @@ export default function App() {
         } else if (msg.orientation === 'unlock') {
           ScreenOrientation.unlockAsync();
         }
+      } else if (msg && msg.type === 'MODAL_STATE') {
+        isWebModalOpenRef.current = !!msg.isOpen;
       } else if (msg && msg.type === 'START_OFFLINE_DOWNLOAD') {
         startOfflineDownload(msg.payload);
       } else if (msg && msg.type === 'OPEN_DOWNLOADS') {
