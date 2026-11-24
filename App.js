@@ -16,6 +16,7 @@ import {
   Animated,
   Easing,
   Dimensions,
+  AppState,
   Alert,
   FlatList,
   Image,
@@ -258,46 +259,6 @@ export default function App() {
     }
   };
 
-  const checkForUpdates = useCallback(async (isManual = false) => {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 6000);
-
-    try {
-      const response = await fetch(`${DEFAULT_SERVER_URL}/api/app/version`, {
-        signal: controller.signal,
-        headers: { Accept: 'application/json' },
-      });
-      clearTimeout(timeoutId);
-
-      if (!response.ok) return;
-
-      const data = await response.json();
-      if (data && isNewerVersion(data.version, CURRENT_APP_VERSION)) {
-        setUpdateInfo(data);
-        // Start background auto update immediately without any blocking popup
-        startDownload(data);
-      }
-    } catch (err) {
-      clearTimeout(timeoutId);
-    }
-  }, []);
-
-  // Ensure app always points to DEFAULT_SERVER_URL and lock portrait orientation on root
-  useEffect(() => {
-    ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP).catch(() => {});
-    const initServerUrl = async () => {
-      try {
-        await AsyncStorage.setItem(STORAGE_KEY, DEFAULT_SERVER_URL);
-      } catch (err) {
-        console.warn('Unable to access AsyncStorage:', err);
-      } finally {
-        setIsStorageLoaded(true);
-        checkForUpdates();
-      }
-    };
-    initServerUrl();
-  }, [checkForUpdates]);
-
   // Toast feedback helper
   const showToast = useCallback((text, type = 'info') => {
     setToastInfo({ text, type });
@@ -316,6 +277,66 @@ export default function App() {
       }).start(() => setToastInfo(null));
     }, 3800);
   }, [toastAnim]);
+
+  const checkForUpdates = useCallback(async (isManual = false) => {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 6000);
+
+    try {
+      const response = await fetch(`${DEFAULT_SERVER_URL}/api/app/version`, {
+        signal: controller.signal,
+        headers: { Accept: 'application/json' },
+      });
+      clearTimeout(timeoutId);
+
+      if (!response.ok) {
+        if (isManual) {
+          showToast('Failed to check for updates', 'error');
+        }
+        return;
+      }
+
+      const data = await response.json();
+      if (data && isNewerVersion(data.version, CURRENT_APP_VERSION)) {
+        setUpdateInfo(data);
+        startDownload(data);
+      } else if (isManual) {
+        showToast(`You are on the latest version (v${CURRENT_APP_VERSION})`, 'success');
+      }
+    } catch (err) {
+      clearTimeout(timeoutId);
+      if (isManual) {
+        showToast('Network error while checking updates', 'error');
+      }
+    }
+  }, [showToast]);
+
+  // Ensure app always points to DEFAULT_SERVER_URL and lock portrait orientation on root
+  useEffect(() => {
+    ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP).catch(() => {});
+    const initServerUrl = async () => {
+      try {
+        await AsyncStorage.setItem(STORAGE_KEY, DEFAULT_SERVER_URL);
+      } catch (err) {
+        console.warn('Unable to access AsyncStorage:', err);
+      } finally {
+        setIsStorageLoaded(true);
+        // Automatic update check on app launch
+        checkForUpdates(false);
+      }
+    };
+    initServerUrl();
+  }, [checkForUpdates]);
+
+  // Check for updates whenever the app returns to the foreground
+  useEffect(() => {
+    const subscription = AppState.addEventListener('change', (nextAppState) => {
+      if (nextAppState === 'active' && !isUpdatingRef.current) {
+        checkForUpdates(false);
+      }
+    });
+    return () => subscription.remove();
+  }, [checkForUpdates]);
 
   // Hardware back button support with double-tap exit
   useEffect(() => {
@@ -942,22 +963,20 @@ export default function App() {
           </View>
         )}
 
-        {/* Floating Downloads Button */}
-        {!hasError && (
+        {/* Floating Downloads Button - Only show when there are active background downloads */}
+        {!hasError && activeDownloadsCount > 0 && (
           <TouchableOpacity
             style={styles.floatingDownloadsBtn}
             activeOpacity={0.85}
             onPress={() => {
               setIsDownloadsModalVisible(true);
-              setDownloadsTab(activeDownloadsCount > 0 ? 'downloading' : 'completed');
+              setDownloadsTab('downloading');
             }}
           >
             <Feather name="download" size={20} color="#f8fafc" />
-            {activeDownloadsCount > 0 && (
-              <View style={styles.floatingBadge}>
-                <Text style={styles.floatingBadgeText}>{activeDownloadsCount}</Text>
-              </View>
-            )}
+            <View style={styles.floatingBadge}>
+              <Text style={styles.floatingBadgeText}>{activeDownloadsCount}</Text>
+            </View>
           </TouchableOpacity>
         )}
       </View>
