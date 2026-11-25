@@ -34,7 +34,7 @@ const { width } = Dimensions.get('window');
 
 const STORAGE_KEY = '@cinema_server_url';
 const DEFAULT_SERVER_URL = 'https://cinama.xyz';
-const CURRENT_APP_VERSION = '1.0.8';
+const CURRENT_APP_VERSION = '1.1.0';
 const OFFLINE_DOWNLOADS_KEY = '@cinema_offline_downloads_v1';
 const DOWNLOADS_DIR = `${FileSystem.documentDirectory}downloads/`;
 const NOTIF_ASKED_KEY = '@cinema_notif_asked';
