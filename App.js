@@ -112,7 +112,7 @@ export default function App() {
             PermissionsAndroid.PERMISSIONS.POST_NOTIFICATIONS,
             {
               title: 'Allow Notifications',
-              message: 'Cinema would like to send you download and update alerts.',
+              message: 'Cinama would like to send you download and update alerts.',
               buttonPositive: 'Allow',
               buttonNegative: 'Not Now',
             }
@@ -351,7 +351,7 @@ export default function App() {
           if (!isGranted) {
             const res = await PermissionsAndroid.request(PermissionsAndroid.PERMISSIONS.POST_NOTIFICATIONS, {
               title: 'Allow Notifications',
-              message: 'Cinema would like to send you movie alerts, downloads and updates.',
+              message: 'Cinama would like to send you movie alerts, downloads and updates.',
               buttonPositive: 'Allow',
               buttonNegative: 'Cancel',
             });
@@ -359,7 +359,7 @@ export default function App() {
               showToast('Notifications enabled', 'success');
               sendNotificationStatusToWeb(true);
             } else {
-              Alert.alert('Permission Required', 'Notifications are currently disabled for Cinema. Please enable them in device settings.', [
+              Alert.alert('Permission Required', 'Notifications are currently disabled for Cinama. Please enable them in device settings.', [
                 { text: 'Cancel', style: 'cancel', onPress: () => sendNotificationStatusToWeb(false) },
                 { text: 'Open Settings', onPress: () => Linking.openSettings() }
               ]);
@@ -397,7 +397,7 @@ export default function App() {
       try {
         const update = await Updates.checkForUpdateAsync();
         if (update.isAvailable) {
-          showToast('Updating Cinema...', 'info');
+          showToast('Updating Cinama...', 'info');
           await Updates.fetchUpdateAsync();
           await Updates.reloadAsync();
           return;
@@ -429,7 +429,7 @@ export default function App() {
       const latestVer = data.latest_version || data.version;
       if (latestVer && isNewerVersion(latestVer, CURRENT_APP_VERSION)) {
         Alert.alert(
-          'Cinema Update Available',
+          'Cinama Update Available',
           `Version v${latestVer} is available with new improvements. Would you like to download it?`,
           [
             { text: 'Later', style: 'cancel' },
@@ -941,7 +941,7 @@ export default function App() {
         <StatusBar barStyle="light-content" translucent backgroundColor="#090d16" />
         <View style={styles.brandingBox}>
           <Feather name="film" size={32} color="#f8fafc" />
-          <Text style={styles.splashBrand}>CINEMA</Text>
+          <Text style={styles.splashBrand}>CINAMA</Text>
         </View>
         <ActivityIndicator size="small" color="#38bdf8" style={styles.splashSpinner} />
       </View>
@@ -967,11 +967,14 @@ export default function App() {
           key={`cinema-wv-${sessionKey}`}
           source={{ uri: DEFAULT_SERVER_URL }}
           style={styles.webView}
-          applicationNameForUserAgent="CinemaApp/1.0.5"
+          applicationNameForUserAgent="CinamaApp/1.0.5"
           setSupportMultipleWindows={false}
           injectedJavaScriptBeforeContentLoaded={`
+            window.isCinamaNativeApp = true;
             window.isCinemaNativeApp = true;
+            window.isCinamaApp = true;
             window.isCinemaApp = true;
+            window.CINAMA_APP_VERSION = '${CURRENT_APP_VERSION}';
             window.CINEMA_APP_VERSION = '${CURRENT_APP_VERSION}';
             true;
           `}
@@ -1074,7 +1077,7 @@ export default function App() {
             <View style={styles.brandingCard}>
               <View style={styles.brandRow}>
                 <Feather name="film" size={28} color="#f8fafc" />
-                <Text style={styles.brandTitle}>CINEMA</Text>
+                <Text style={styles.brandTitle}>CINAMA</Text>
               </View>
               <View style={styles.badgeContainer}>
                 <Text style={styles.badgeText}>STREAMING CLIENT</Text>
@@ -1082,7 +1085,7 @@ export default function App() {
             </View>
 
             <ActivityIndicator size="large" color="#38bdf8" style={styles.loader} />
-            <Text style={styles.loadingCaption}>Loading Cinema...</Text>
+            <Text style={styles.loadingCaption}>Loading Cinama...</Text>
           </View>
         )}
 
@@ -1205,7 +1208,7 @@ export default function App() {
                 <Text style={styles.storageLabel}>Device Storage</Text>
               </View>
               <Text style={styles.storageValues}>
-                Cinema: <Text style={{ color: '#38bdf8', fontWeight: 'bold' }}>{storageInfo.usedMB} MB</Text> • Free: {storageInfo.freeGB} GB
+                Cinama: <Text style={{ color: '#38bdf8', fontWeight: 'bold' }}>{storageInfo.usedMB} MB</Text> • Free: {storageInfo.freeGB} GB
               </Text>
             </View>
             <View style={styles.storageTrack}>
