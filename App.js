@@ -329,6 +329,63 @@ export default function App() {
     }, 3800);
   }, [toastAnim]);
 
+  const sendNotificationStatusToWeb = useCallback((granted) => {
+    if (webViewRef.current) {
+      webViewRef.current.injectJavaScript(
+        `if (typeof window.onNativeNotificationStatus === 'function') window.onNativeNotificationStatus(${granted}); window.dispatchEvent(new CustomEvent('cinema:nativeNotificationStatus', { detail: { granted: ${granted} } })); true;`
+      );
+    }
+  }, []);
+
+  const handleSetNotificationPreference = useCallback(async (enabled) => {
+    if (Platform.OS !== 'android') return;
+    try {
+      if (Platform.Version >= 33) {
+        const isGranted = await PermissionsAndroid.check(PermissionsAndroid.PERMISSIONS.POST_NOTIFICATIONS);
+        if (enabled) {
+          if (!isGranted) {
+            const res = await PermissionsAndroid.request(PermissionsAndroid.PERMISSIONS.POST_NOTIFICATIONS, {
+              title: 'Allow Notifications',
+              message: 'Cinema would like to send you movie alerts, downloads and updates.',
+              buttonPositive: 'Allow',
+              buttonNegative: 'Cancel',
+            });
+            if (res === PermissionsAndroid.RESULTS.GRANTED) {
+              showToast('Notifications enabled', 'success');
+              sendNotificationStatusToWeb(true);
+            } else {
+              Alert.alert('Permission Required', 'Notifications are currently disabled for Cinema. Please enable them in device settings.', [
+                { text: 'Cancel', style: 'cancel', onPress: () => sendNotificationStatusToWeb(false) },
+                { text: 'Open Settings', onPress: () => Linking.openSettings() }
+              ]);
+              sendNotificationStatusToWeb(false);
+            }
+          } else {
+            showToast('Notifications are active', 'info');
+            sendNotificationStatusToWeb(true);
+          }
+        } else {
+          Alert.alert('Disable Notifications', 'To turn off notifications, please disable them in your device App Settings.', [
+            { text: 'Cancel', style: 'cancel', onPress: () => sendNotificationStatusToWeb(true) },
+            { text: 'Open Settings', onPress: () => { Linking.openSettings(); sendNotificationStatusToWeb(false); } }
+          ]);
+        }
+      } else {
+        if (!enabled) {
+          Alert.alert('Disable Notifications', 'To turn off notifications, please disable them in your device App Settings.', [
+            { text: 'Cancel', style: 'cancel' },
+            { text: 'Open Settings', onPress: () => Linking.openSettings() }
+          ]);
+        } else {
+          showToast('Notifications enabled', 'success');
+          sendNotificationStatusToWeb(true);
+        }
+      }
+    } catch (e) {
+      console.warn('Notification pref error:', e);
+    }
+  }, [showToast, sendNotificationStatusToWeb]);
+
   const checkForUpdates = useCallback(async (isManual = false) => {
     // 1. Try Expo Over-The-Air (OTA) Updates first (seamless without prompt)
     if (!__DEV__ && Updates.isEnabled) {
@@ -396,15 +453,26 @@ export default function App() {
     initServerUrl();
   }, [checkForUpdates]);
 
-  // Check for updates whenever the app returns to the foreground
+  // Check for updates and notification permission whenever the app returns to the foreground
   useEffect(() => {
     const subscription = AppState.addEventListener('change', (nextAppState) => {
-      if (nextAppState === 'active' && !isUpdatingRef.current) {
-        checkForUpdates(false);
+      if (nextAppState === 'active') {
+        if (!isUpdatingRef.current) {
+          checkForUpdates(false);
+        }
+        if (Platform.OS === 'android') {
+          if (Platform.Version >= 33) {
+            PermissionsAndroid.check(PermissionsAndroid.PERMISSIONS.POST_NOTIFICATIONS)
+              .then((isGranted) => sendNotificationStatusToWeb(isGranted))
+              .catch(() => {});
+          } else {
+            sendNotificationStatusToWeb(true);
+          }
+        }
       }
     });
     return () => subscription.remove();
-  }, [checkForUpdates]);
+  }, [checkForUpdates, sendNotificationStatusToWeb]);
 
   // Hardware back button support with double-tap exit
   useEffect(() => {
@@ -826,22 +894,22 @@ export default function App() {
       } else if (msg && msg.type === 'CHECK_FOR_UPDATES') {
         checkForUpdates(true);
       } else if (msg && msg.type === 'SET_NOTIFICATION_PREFERENCE') {
-        if (msg.enabled && Platform.OS === 'android' && Platform.Version >= 33) {
-          PermissionsAndroid.request(
-            PermissionsAndroid.PERMISSIONS.POST_NOTIFICATIONS,
-            {
-              title: 'Allow Notifications',
-              message: 'Cinema would like to send you download and update alerts.',
-              buttonPositive: 'Allow',
-              buttonNegative: 'Not Now',
-            }
-          ).catch(() => {});
+        handleSetNotificationPreference(Boolean(msg.enabled));
+      } else if (msg && msg.type === 'CHECK_NOTIFICATION_PERMISSION') {
+        if (Platform.OS === 'android' && Platform.Version >= 33) {
+          PermissionsAndroid.check(PermissionsAndroid.PERMISSIONS.POST_NOTIFICATIONS)
+            .then((granted) => sendNotificationStatusToWeb(granted))
+            .catch(() => sendNotificationStatusToWeb(false));
+        } else {
+          sendNotificationStatusToWeb(true);
         }
+      } else if (msg && msg.type === 'OPEN_APP_SETTINGS') {
+        Linking.openSettings().catch(() => {});
       }
     } catch (err) {
       console.warn('WebView message error:', err);
     }
-  }, [startOfflineDownload]);
+  }, [startOfflineDownload, startDownload, updateInfo, checkForUpdates, handleSetNotificationPreference, sendNotificationStatusToWeb]);
 
   const handleContentProcessDidTerminate = useCallback(() => {
     if (webViewRef.current) {
