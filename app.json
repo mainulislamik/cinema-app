@@ -32,9 +32,7 @@
       "fallbackToCacheTimeout": 0,
       "url": "https://u.expo.dev/5edbe0f6-4161-4be1-9f14-05af771423f8"
     },
-    "runtimeVersion": {
-      "policy": "appVersion"
-    },
+    "runtimeVersion": "1.0.6",
     "extra": {
       "defaultApiUrl": "http://169.40.116.114:8099",
       "offlineFallback": true,

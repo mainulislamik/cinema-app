@@ -397,9 +397,8 @@ export default function App() {
       try {
         const update = await Updates.checkForUpdateAsync();
         if (update.isAvailable) {
-          showToast('Downloading update...', 'info');
+          showToast('Updating Cinema...', 'info');
           await Updates.fetchUpdateAsync();
-          showToast('Applying update...', 'info');
           await Updates.reloadAsync();
           return;
         }
@@ -408,7 +407,9 @@ export default function App() {
       }
     }
 
-    // 2. Fallback to API / APK check
+    // 2. Only check for manual APK updates when user explicitly taps "Check for Updates"
+    if (!isManual) return;
+
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 6000);
 
@@ -420,28 +421,38 @@ export default function App() {
       clearTimeout(timeoutId);
 
       if (!response.ok) {
-        if (isManual) {
-          showToast('Failed to check for updates', 'error');
-        }
+        showToast('Unable to check for updates', 'error');
         return;
       }
 
       const data = await response.json();
-      if (data && isNewerVersion(data.version, CURRENT_APP_VERSION)) {
-        setUpdateInfo(data);
-        if (data.auto_update === true || data.force_update === true || isManual) {
-          startDownload(data);
-        }
-      } else if (isManual) {
+      const latestVer = data.latest_version || data.version;
+      if (latestVer && isNewerVersion(latestVer, CURRENT_APP_VERSION)) {
+        Alert.alert(
+          'Cinema Update Available',
+          `Version v${latestVer} is available with new improvements. Would you like to download it?`,
+          [
+            { text: 'Later', style: 'cancel' },
+            {
+              text: 'Download',
+              onPress: () => {
+                const downloadPath = data.download_url || '/downloads/cinema.apk';
+                const apkUrl = downloadPath.startsWith('http')
+                  ? downloadPath
+                  : `${DEFAULT_SERVER_URL.replace(/\/+$/, '')}/${downloadPath.replace(/^\/+/, '')}`;
+                Linking.openURL(apkUrl).catch(() => {});
+              },
+            },
+          ]
+        );
+      } else {
         showToast(`You are on the latest version (v${CURRENT_APP_VERSION})`, 'success');
       }
     } catch (err) {
       clearTimeout(timeoutId);
-      if (isManual) {
-        showToast('Network error while checking updates', 'error');
-      }
+      showToast('Network error while checking updates', 'error');
     }
-  }, [showToast, startDownload]);
+  }, [showToast]);
 
   // Ensure app always points to DEFAULT_SERVER_URL and lock portrait orientation on root
   useEffect(() => {
@@ -891,13 +902,12 @@ export default function App() {
         setIsDownloadsModalVisible(true);
         setDownloadsTab('completed');
       } else if (msg && msg.type === 'START_APP_UPDATE') {
-        if (msg.payload) {
-          startDownload(msg.payload);
-        } else if (updateInfo) {
-          startDownload(updateInfo);
-        } else {
-          checkForUpdates(true);
-        }
+        const info = msg.payload || updateInfo;
+        const downloadPath = (info && info.download_url) || '/downloads/cinema.apk';
+        const browserUrl = downloadPath.startsWith('http')
+          ? downloadPath
+          : `${DEFAULT_SERVER_URL.replace(/\/+$/, '')}/${downloadPath.replace(/^\/+/, '')}`;
+        Linking.openURL(browserUrl).catch(() => {});
       } else if (msg && msg.type === 'CHECK_FOR_UPDATES') {
         checkForUpdates(true);
       } else if (msg && msg.type === 'SET_NOTIFICATION_PREFERENCE') {
@@ -1159,102 +1169,7 @@ export default function App() {
         </Animated.View>
       )}
 
-      {/* Non-intrusive Floating Update Toast / Banner (Never blocks user from watching or browsing) */}
-      {isUpdating && (
-        <View style={styles.floatingUpdateBanner} pointerEvents="box-none">
-          <View style={styles.floatingUpdateCard}>
-            <View style={styles.floatingUpdateHeader}>
-              <View style={[
-                styles.floatingUpdateIconBox,
-                updateState === 'completed' && { backgroundColor: 'rgba(16, 185, 129, 0.15)' },
-                updateState === 'error' && { backgroundColor: 'rgba(239, 68, 68, 0.15)' },
-              ]}>
-                <Feather
-                  name={updateState === 'completed' ? 'check-circle' : updateState === 'error' ? 'alert-triangle' : 'download-cloud'}
-                  size={18}
-                  color={updateState === 'completed' ? '#10b981' : updateState === 'error' ? '#ef4444' : '#38bdf8'}
-                />
-              </View>
-
-              <View style={styles.floatingUpdateTextBox}>
-                <Text style={styles.floatingUpdateTitle} numberOfLines={1}>
-                  {updateState === 'completed'
-                    ? 'Update Ready to Install'
-                    : updateState === 'error'
-                    ? 'Update Download Failed'
-                    : `Updating Cinema v${updateInfo?.version || ''} (${updateProgress}%)`}
-                </Text>
-                <Text style={styles.floatingUpdateSubtext} numberOfLines={1}>
-                  {updateState === 'completed'
-                    ? 'Tap Install to update now'
-                    : updateState === 'error'
-                    ? (downloadError || 'Check your internet connection')
-                    : (downloadedSizeText ? `${downloadedSizeText} • Downloading in background` : 'Downloading in background...')}
-                </Text>
-              </View>
-
-              {/* Action Buttons */}
-              {updateState === 'completed' && downloadedApkUri && (
-                <TouchableOpacity
-                  style={styles.floatingActionBtn}
-                  activeOpacity={0.8}
-                  onPress={() => triggerInstallApk(downloadedApkUri)}
-                >
-                  <Text style={styles.floatingActionBtnText}>Install</Text>
-                </TouchableOpacity>
-              )}
-              {updateState === 'error' && (
-                <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-                  <TouchableOpacity
-                    style={[styles.floatingActionBtn, { backgroundColor: '#f59e0b', marginRight: 6 }]}
-                    activeOpacity={0.8}
-                    onPress={() => startDownload(updateInfo)}
-                  >
-                    <Text style={styles.floatingActionBtnText}>Retry</Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity
-                    style={[styles.floatingActionBtn, { backgroundColor: '#3b82f6' }]}
-                    activeOpacity={0.8}
-                    onPress={() => {
-                      const downloadPath = (updateInfo && updateInfo.download_url) || '/downloads/cinema.apk';
-                      const browserUrl = downloadPath.startsWith('http')
-                        ? downloadPath
-                        : `${DEFAULT_SERVER_URL.replace(/\/+$/, '')}/${downloadPath.replace(/^\/+/, '')}`;
-                      Linking.openURL(browserUrl).catch(() => {});
-                    }}
-                  >
-                    <Text style={styles.floatingActionBtnText}>Browser</Text>
-                  </TouchableOpacity>
-                </View>
-              )}
-              <TouchableOpacity
-                style={styles.floatingCloseBtn}
-                activeOpacity={0.7}
-                onPress={() => setIsUpdating(false)}
-              >
-                <Feather name="x" size={16} color="#94a3b8" />
-              </TouchableOpacity>
-            </View>
-
-            {/* Progress Bar (Only during downloading) */}
-            {updateState === 'downloading' && (
-              <View style={styles.floatingProgressTrack}>
-                <Animated.View
-                  style={[
-                    styles.floatingProgressBar,
-                    {
-                      width: progressWidth,
-                      backgroundColor: '#38bdf8',
-                    },
-                  ]}
-                />
-              </View>
-            )}
-          </View>
-        </View>
-      )}
-
-      {/* MovieBox-style Offline Downloads Modal */}
+            {/* MovieBox-style Offline Downloads Modal */}
       <Modal
         visible={isDownloadsModalVisible}
         animationType="slide"
