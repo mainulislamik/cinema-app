@@ -65,12 +65,12 @@ for folder, size in SPLASH_SIZES.items():
     sp.save(os.path.join(target_dir, "splashscreen_logo.png"), "PNG")
     print(f"Updated {folder}: splash {size}x{size}")
 
-# Update colors.xml iconBackground to #09090b
+# Update colors.xml iconBackground to #020617
 colors_xml_path = os.path.join(RES_DIR, "values/colors.xml")
 with open(colors_xml_path, "w") as f:
     f.write("""<resources>
-  <color name="splashscreen_background">#09090b</color>
-  <color name="iconBackground">#09090b</color>
+  <color name="splashscreen_background">#020617</color>
+  <color name="iconBackground">#020617</color>
   <color name="colorPrimary">#E11D48</color>
 </resources>
 """)

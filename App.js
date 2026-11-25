@@ -29,12 +29,25 @@ import * as ScreenOrientation from 'expo-screen-orientation';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as IntentLauncher from 'expo-intent-launcher';
 import * as Updates from 'expo-updates';
+import { useKeepAwake, activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake';
+import NetInfo from '@react-native-community/netinfo';
+import * as Notifications from 'expo-notifications';
+
+Notifications.setNotificationHandler({
+  handleNotification: async () => ({
+    shouldShowAlert: true,
+    shouldShowBanner: true,
+    shouldShowList: true,
+    shouldPlaySound: true,
+    shouldSetBadge: false,
+  }),
+});
 
 const { width } = Dimensions.get('window');
 
 const STORAGE_KEY = '@cinema_server_url';
 const DEFAULT_SERVER_URL = 'https://cinama.xyz';
-const CURRENT_APP_VERSION = '1.0.8';
+const CURRENT_APP_VERSION = '1.0.9';
 const OFFLINE_DOWNLOADS_KEY = '@cinema_offline_downloads_v1';
 const DOWNLOADS_DIR = `${FileSystem.documentDirectory}downloads/`;
 const NOTIF_ASKED_KEY = '@cinema_notif_asked';
@@ -391,21 +404,75 @@ export default function App() {
     }
   }, [showToast, sendNotificationStatusToWeb]);
 
-  const checkForUpdates = useCallback(async (isManual = false) => {
-    // 1. Try Expo Over-The-Air (OTA) Updates first (seamless without prompt)
-    if (!__DEV__ && Updates.isEnabled) {
-      try {
-        const update = await Updates.checkForUpdateAsync();
-        if (update.isAvailable) {
-          showToast('Updating Cinama...', 'info');
-          await Updates.fetchUpdateAsync();
-          await Updates.reloadAsync();
-          return;
-        }
-      } catch (otaErr) {
-        console.warn('Expo OTA update check error:', otaErr);
+  const handleRetry = useCallback(() => {
+    setHasError(false);
+    setIsLoading(true);
+    hasInitialLoadedRef.current = false;
+    setSessionKey((prev) => prev + 1);
+  }, []);
+
+  const handleRefresh = useCallback(() => {
+    setIsRefreshing(true);
+    handleRetry();
+    setTimeout(() => {
+      setIsRefreshing(false);
+    }, 1200);
+  }, [handleRetry]);
+
+  // Keep screen awake while video is playing or streaming
+  const setKeepAwake = useCallback(async (active) => {
+    try {
+      if (active) {
+        await activateKeepAwakeAsync('cinama_playback');
+      } else {
+        await deactivateKeepAwake('cinama_playback');
       }
+    } catch (_) {}
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      deactivateKeepAwake('cinama_playback').catch(() => {});
+    };
+  }, []);
+
+  // Listen to NetInfo to detect offline state and handle connection changes
+  const wasOfflineRef = useRef(false);
+  useEffect(() => {
+    const unsubscribe = NetInfo.addEventListener((state) => {
+      const isOnline = Boolean(state.isConnected && state.isInternetReachable !== false);
+      if (!isOnline) {
+        wasOfflineRef.current = true;
+        setHasError(true);
+        setIsLoading(false);
+        showToast('No internet connection', 'error');
+      } else if (state.isConnected && wasOfflineRef.current) {
+        wasOfflineRef.current = false;
+        setHasError(false);
+        showToast('Internet connection restored', 'success');
+        handleRetry();
+      }
+    });
+    return () => unsubscribe();
+  }, [handleRetry, showToast]);
+
+  // Check expo-updates silently on launch and when foregrounded
+  const checkExpoUpdatesSilent = useCallback(async () => {
+    if (__DEV__ || !Updates.isEnabled) return;
+    try {
+      const update = await Updates.checkForUpdateAsync();
+      if (update.isAvailable) {
+        await Updates.fetchUpdateAsync();
+        await Updates.reloadAsync();
+      }
+    } catch (err) {
+      console.warn('Silent expo-updates check error:', err);
     }
+  }, []);
+
+  const checkForUpdates = useCallback(async (isManual = false) => {
+    // 1. Silent Expo OTA update check
+    await checkExpoUpdatesSilent();
 
     // 2. Only check for manual APK updates when user explicitly taps "Check for Updates"
     if (!isManual) return;
@@ -452,7 +519,7 @@ export default function App() {
       clearTimeout(timeoutId);
       showToast('Network error while checking updates', 'error');
     }
-  }, [showToast]);
+  }, [showToast, checkExpoUpdatesSilent]);
 
   // Ensure app always points to DEFAULT_SERVER_URL and lock portrait orientation on root
   useEffect(() => {
@@ -464,20 +531,18 @@ export default function App() {
         console.warn('Unable to access AsyncStorage:', err);
       } finally {
         setIsStorageLoaded(true);
-        // Automatic update check on app launch
-        checkForUpdates(false);
+        // Silent check on app launch
+        checkExpoUpdatesSilent();
       }
     };
     initServerUrl();
-  }, [checkForUpdates]);
+  }, [checkExpoUpdatesSilent]);
 
   // Check for updates and notification permission whenever the app returns to the foreground
   useEffect(() => {
     const subscription = AppState.addEventListener('change', (nextAppState) => {
       if (nextAppState === 'active') {
-        if (!isUpdatingRef.current) {
-          checkForUpdates(false);
-        }
+        checkExpoUpdatesSilent();
         if (Platform.OS === 'android') {
           if (Platform.Version >= 33) {
             PermissionsAndroid.check(PermissionsAndroid.PERMISSIONS.POST_NOTIFICATIONS)
@@ -487,10 +552,15 @@ export default function App() {
             sendNotificationStatusToWeb(true);
           }
         }
+      } else {
+        setKeepAwake(false);
       }
     });
-    return () => subscription.remove();
-  }, [checkForUpdates, sendNotificationStatusToWeb]);
+    return () => {
+      subscription.remove();
+      setKeepAwake(false);
+    };
+  }, [checkExpoUpdatesSilent, sendNotificationStatusToWeb, setKeepAwake]);
 
   // Hardware back button support with double-tap exit
   useEffect(() => {
@@ -532,21 +602,6 @@ export default function App() {
 
     return () => backSubscription.remove();
   }, [showToast]);
-
-  const handleRetry = useCallback(() => {
-    setHasError(false);
-    setIsLoading(true);
-    hasInitialLoadedRef.current = false;
-    setSessionKey((prev) => prev + 1);
-  }, []);
-
-  const handleRefresh = useCallback(() => {
-    setIsRefreshing(true);
-    handleRetry();
-    setTimeout(() => {
-      setIsRefreshing(false);
-    }, 1200);
-  }, [handleRetry]);
 
   // Ensure downloads directory exists
   const ensureDownloadsDirectory = async () => {
@@ -727,6 +782,13 @@ export default function App() {
           return finalDownloads;
         });
         showToast(`Finished: ${payload.title} saved offline!`, 'success');
+        Notifications.scheduleNotificationAsync({
+          content: {
+            title: 'Download Complete',
+            body: `${payload.title} (${payload.resolution || 'HD'}) is saved for offline watching`,
+          },
+          trigger: null,
+        }).catch(() => {});
       }
     } catch (err) {
       delete activeTasksRef.current[id];
@@ -739,6 +801,13 @@ export default function App() {
         return errList;
       });
       showToast(`Download failed: ${payload.title}`, 'error');
+      Notifications.scheduleNotificationAsync({
+        content: {
+          title: 'Download Failed',
+          body: `Could not complete download for ${payload.title}`,
+        },
+        trigger: null,
+      }).catch(() => {});
     }
   }, [showToast, refreshStorageInfo]);
 
@@ -846,6 +915,7 @@ export default function App() {
         Alert.alert('File Not Found', 'This video file was removed or moved.');
         return;
       }
+      setKeepAwake(true);
       const contentUri = await FileSystem.getContentUriAsync(item.fileUri);
       await IntentLauncher.startActivityAsync('android.intent.action.VIEW', {
         data: contentUri,
@@ -859,7 +929,7 @@ export default function App() {
         'Please ensure you have a media player installed (such as VLC, MX Player, or Google Photos) to play downloaded videos.'
       );
     }
-  }, []);
+  }, [setKeepAwake]);
 
   const handleWebViewError = (syntheticEvent) => {
     console.warn('WebView error occurred:', syntheticEvent.nativeEvent);
@@ -870,7 +940,7 @@ export default function App() {
   const handleHttpError = (syntheticEvent) => {
     const { statusCode, url } = syntheticEvent.nativeEvent;
     // Sub-resources like 404 images, posters, favicon, subtitle files should NOT crash the app
-    const isMainDoc = !url || url === serverUrl || url === `${serverUrl}/` || url.startsWith(`${serverUrl}/?`) || url.startsWith(`${serverUrl}/#`);
+    const isMainDoc = !url || url === DEFAULT_SERVER_URL || url === `${DEFAULT_SERVER_URL}/` || url.startsWith(`${DEFAULT_SERVER_URL}/?`) || url.startsWith(`${DEFAULT_SERVER_URL}/#`);
     if (statusCode >= 400 && isMainDoc) {
       console.warn('WebView Main Document HTTP error:', statusCode, url);
       setHasError(true);
@@ -889,13 +959,22 @@ export default function App() {
       if (msg && msg.type === 'SET_ORIENTATION') {
         if (msg.orientation === 'landscape') {
           ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.LANDSCAPE);
+          setKeepAwake(true);
         } else if (msg.orientation === 'portrait') {
           ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP);
+          setKeepAwake(false);
         } else if (msg.orientation === 'unlock') {
           ScreenOrientation.unlockAsync();
         }
+      } else if (msg && msg.type === 'VIDEO_PLAYING') {
+        setKeepAwake(Boolean(msg.isPlaying));
+      } else if (msg && msg.type === 'KEEP_AWAKE') {
+        setKeepAwake(Boolean(msg.active));
       } else if (msg && msg.type === 'MODAL_STATE') {
         isWebModalOpenRef.current = !!msg.isOpen;
+        if (msg.modal === 'player') {
+          setKeepAwake(Boolean(msg.isOpen));
+        }
       } else if (msg && msg.type === 'START_OFFLINE_DOWNLOAD') {
         startOfflineDownload(msg.payload);
       } else if (msg && msg.type === 'OPEN_DOWNLOADS') {
@@ -926,7 +1005,7 @@ export default function App() {
     } catch (err) {
       console.warn('WebView message error:', err);
     }
-  }, [startOfflineDownload, startDownload, updateInfo, checkForUpdates, handleSetNotificationPreference, sendNotificationStatusToWeb]);
+  }, [startOfflineDownload, startDownload, updateInfo, checkForUpdates, handleSetNotificationPreference, sendNotificationStatusToWeb, setKeepAwake]);
 
   const handleContentProcessDidTerminate = useCallback(() => {
     if (webViewRef.current) {
@@ -967,7 +1046,7 @@ export default function App() {
           key={`cinema-wv-${sessionKey}`}
           source={{ uri: DEFAULT_SERVER_URL }}
           style={styles.webView}
-          applicationNameForUserAgent="CinamaApp/1.0.5"
+          applicationNameForUserAgent="CinamaApp/1.0.9"
           setSupportMultipleWindows={false}
           injectedJavaScriptBeforeContentLoaded={`
             window.isCinamaNativeApp = true;
@@ -989,6 +1068,31 @@ export default function App() {
                 style.type = 'text/css';
                 style.appendChild(document.createTextNode(hideCss));
                 (document.head || document.documentElement).appendChild(style);
+
+                // Video playback & streaming detection for KeepAwake
+                function notifyVideoPlayback() {
+                  try {
+                    var videos = document.querySelectorAll('video');
+                    var isPlaying = false;
+                    for (var i = 0; i < videos.length; i++) {
+                      if (!videos[i].paused && !videos[i].ended && videos[i].currentTime > 0) {
+                        isPlaying = true;
+                        break;
+                      }
+                    }
+                    if (window.ReactNativeWebView && window.ReactNativeWebView.postMessage) {
+                      window.ReactNativeWebView.postMessage(JSON.stringify({
+                        type: 'VIDEO_PLAYING',
+                        isPlaying: isPlaying
+                      }));
+                    }
+                  } catch(e) {}
+                }
+
+                document.addEventListener('play', notifyVideoPlayback, true);
+                document.addEventListener('playing', notifyVideoPlayback, true);
+                document.addEventListener('pause', notifyVideoPlayback, true);
+                document.addEventListener('ended', notifyVideoPlayback, true);
 
                 // Global capture-phase download interceptor: NEVER let clicks redirect to browser
                 document.addEventListener('click', function(e) {
