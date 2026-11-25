@@ -59,6 +59,8 @@
         {
           "android": {
             "usesCleartextTraffic": true,
+            "enableMinifyInReleaseBuilds": false,
+            "extraProguardRules": "-ignorewarnings\n-dontwarn expo.modules.**\n-dontwarn com.facebook.react.**\n-keep class expo.modules.** { *; }",
             "extraGradleProperties": {
               "org.gradle.jvmargs": "-Xmx4096m -XX:MaxMetaspaceSize=1536m"
             }
