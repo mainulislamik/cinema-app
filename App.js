@@ -33,7 +33,7 @@ const { width } = Dimensions.get('window');
 
 const STORAGE_KEY = '@cinema_server_url';
 const DEFAULT_SERVER_URL = 'http://169.40.116.114:8099';
-const CURRENT_APP_VERSION = '1.0.6';
+const CURRENT_APP_VERSION = '1.0.7';
 const OFFLINE_DOWNLOADS_KEY = '@cinema_offline_downloads_v1';
 const DOWNLOADS_DIR = `${FileSystem.documentDirectory}downloads/`;
 
@@ -892,6 +892,8 @@ export default function App() {
           mediaPlaybackRequiresUserAction={false}
           javaScriptEnabled={true}
           domStorageEnabled={true}
+          cacheEnabled={true}
+          cacheMode="LOAD_DEFAULT"
           sharedCookiesEnabled={true}
           thirdPartyCookiesEnabled={true}
           mixedContentMode="always"
