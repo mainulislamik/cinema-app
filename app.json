@@ -2,7 +2,7 @@
   "expo": {
     "name": "Cinama",
     "slug": "cinema",
-    "version": "1.0.7",
+    "version": "1.0.8",
     "orientation": "default",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "dark",
@@ -11,7 +11,7 @@
       "bundleIdentifier": "com.imon.cinema"
     },
     "android": {
-      "versionCode": 8,
+      "versionCode": 9,
       "allowBackup": false,
       "adaptiveIcon": {
         "foregroundImage": "./assets/android-icon-foreground.png",
@@ -32,9 +32,9 @@
       "fallbackToCacheTimeout": 0,
       "url": "https://u.expo.dev/5edbe0f6-4161-4be1-9f14-05af771423f8"
     },
-    "runtimeVersion": "1.0.6",
+    "runtimeVersion": "1.0.8",
     "extra": {
-      "defaultApiUrl": "http://169.40.116.114:8099",
+      "defaultApiUrl": "https://cinama.xyz",
       "offlineFallback": true,
       "eas": {
         "projectId": "5edbe0f6-4161-4be1-9f14-05af771423f8"
@@ -48,7 +48,10 @@
         "expo-build-properties",
         {
           "android": {
-            "usesCleartextTraffic": true
+            "usesCleartextTraffic": true,
+            "extraGradleProperties": {
+              "org.gradle.jvmargs": "-Xmx4096m -XX:MaxMetaspaceSize=1536m"
+            }
           }
         }
       ],
