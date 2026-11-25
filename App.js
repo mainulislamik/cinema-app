@@ -20,6 +20,7 @@ import {
   Alert,
   FlatList,
   Image,
+  PermissionsAndroid,
 } from 'react-native';
 import { WebView } from 'react-native-webview';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -36,6 +37,7 @@ const DEFAULT_SERVER_URL = 'http://169.40.116.114:8099';
 const CURRENT_APP_VERSION = '1.0.7';
 const OFFLINE_DOWNLOADS_KEY = '@cinema_offline_downloads_v1';
 const DOWNLOADS_DIR = `${FileSystem.documentDirectory}downloads/`;
+const NOTIF_ASKED_KEY = '@cinema_notif_asked';
 
 const isNewerVersion = (remoteVer, currentVer) => {
   if (!remoteVer || typeof remoteVer !== 'string') return false;
@@ -96,6 +98,33 @@ export default function App() {
   const spinAnim = useRef(new Animated.Value(0)).current;
   const progressAnim = useRef(new Animated.Value(0)).current;
   const toastAnim = useRef(new Animated.Value(-100)).current;
+
+  // Request POST_NOTIFICATIONS permission on Android 13+ (API 33+) once per install
+  useEffect(() => {
+    if (Platform.OS !== 'android') return;
+    const requestNotifPermission = async () => {
+      try {
+        const alreadyAsked = await AsyncStorage.getItem(NOTIF_ASKED_KEY);
+        if (alreadyAsked) return;
+        await AsyncStorage.setItem(NOTIF_ASKED_KEY, 'true');
+        if (Platform.Version >= 33) {
+          await PermissionsAndroid.request(
+            PermissionsAndroid.PERMISSIONS.POST_NOTIFICATIONS,
+            {
+              title: 'Allow Notifications',
+              message: 'Cinema would like to send you download and update alerts.',
+              buttonPositive: 'Allow',
+              buttonNegative: 'Not Now',
+            }
+          );
+        }
+      } catch (e) {
+        // Non-critical — ignore silently
+      }
+    };
+    const timer = setTimeout(requestNotifPermission, 1500);
+    return () => clearTimeout(timer);
+  }, []);
 
   useEffect(() => {
     canGoBackRef.current = canGoBack;
