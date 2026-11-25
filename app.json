@@ -2,7 +2,7 @@
   "expo": {
     "name": "Cinama",
     "slug": "cinema",
-    "version": "1.0.9",
+    "version": "1.1.0",
     "orientation": "default",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "dark",
@@ -11,7 +11,8 @@
       "bundleIdentifier": "com.imon.cinema"
     },
     "android": {
-      "versionCode": 10,
+      "versionCode": 11,
+      "usesCleartextTraffic": true,
       "allowBackup": false,
       "adaptiveIcon": {
         "foregroundImage": "./assets/android-icon-foreground.png",
@@ -20,13 +21,20 @@
       "package": "com.imon.cinema",
       "permissions": [
         "INTERNET",
+        "WAKE_LOCK",
+        "POST_NOTIFICATIONS",
+        "READ_MEDIA_VIDEO",
+        "READ_MEDIA_AUDIO",
+        "READ_MEDIA_IMAGES",
+        "WRITE_EXTERNAL_STORAGE",
+        "READ_EXTERNAL_STORAGE",
         "ACCESS_NETWORK_STATE",
         "ACCESS_WIFI_STATE",
-        "WAKE_LOCK",
-        "REQUEST_INSTALL_PACKAGES",
-        "POST_NOTIFICATIONS",
         "FOREGROUND_SERVICE",
-        "FOREGROUND_SERVICE_DATA_SYNC"
+        "FOREGROUND_SERVICE_DATA_SYNC",
+        "VIBRATE",
+        "SYSTEM_ALERT_WINDOW",
+        "REQUEST_INSTALL_PACKAGES"
       ]
     },
     "updates": {
@@ -35,7 +43,7 @@
       "fallbackToCacheTimeout": 0,
       "url": "https://u.expo.dev/5edbe0f6-4161-4be1-9f14-05af771423f8"
     },
-    "runtimeVersion": "1.0.9",
+    "runtimeVersion": "1.0.0",
     "extra": {
       "defaultApiUrl": "https://cinama.xyz",
       "offlineFallback": true,
@@ -65,7 +73,10 @@
           "resizeMode": "contain",
           "backgroundColor": "#020617"
         }
-      ]
+      ],
+      "expo-sqlite",
+      "expo-sharing",
+      "expo-web-browser"
     ]
   }
 }

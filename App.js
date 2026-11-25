@@ -21,6 +21,7 @@ import {
   FlatList,
   Image,
   PermissionsAndroid,
+  Share,
 } from 'react-native';
 import { WebView } from 'react-native-webview';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -29,9 +30,14 @@ import * as ScreenOrientation from 'expo-screen-orientation';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as IntentLauncher from 'expo-intent-launcher';
 import * as Updates from 'expo-updates';
-import { useKeepAwake, activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake';
+import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake';
 import NetInfo from '@react-native-community/netinfo';
 import * as Notifications from 'expo-notifications';
+import * as Haptics from 'expo-haptics';
+import * as Sharing from 'expo-sharing';
+import * as WebBrowser from 'expo-web-browser';
+import * as Clipboard from 'expo-clipboard';
+import * as MediaLibrary from 'expo-media-library';
 
 Notifications.setNotificationHandler({
   handleNotification: async () => ({
@@ -47,7 +53,7 @@ const { width } = Dimensions.get('window');
 
 const STORAGE_KEY = '@cinema_server_url';
 const DEFAULT_SERVER_URL = 'https://cinama.xyz';
-const CURRENT_APP_VERSION = '1.0.9';
+const CURRENT_APP_VERSION = '1.1.0';
 const OFFLINE_DOWNLOADS_KEY = '@cinema_offline_downloads_v1';
 const DOWNLOADS_DIR = `${FileSystem.documentDirectory}downloads/`;
 const NOTIF_ASKED_KEY = '@cinema_notif_asked';
@@ -75,6 +81,7 @@ export default function App() {
   const [isStorageLoaded, setIsStorageLoaded] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [hasError, setHasError] = useState(false);
+  const [isOffline, setIsOffline] = useState(false);
   const [canGoBack, setCanGoBack] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [sessionKey, setSessionKey] = useState(0);
@@ -419,6 +426,125 @@ export default function App() {
     }, 1200);
   }, [handleRetry]);
 
+  // Haptics handler (selection, light, medium, heavy)
+  const handleHaptics = useCallback((feedback) => {
+    try {
+      const style = (
+        typeof feedback === 'string'
+          ? feedback
+          : feedback?.style || feedback?.type || feedback?.feedback || 'light'
+      ).toLowerCase();
+
+      switch (style) {
+        case 'selection':
+          Haptics.selectionAsync().catch(() => {});
+          break;
+        case 'heavy':
+          Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy).catch(() => {});
+          break;
+        case 'medium':
+          Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium).catch(() => {});
+          break;
+        case 'success':
+        case 'notification_success':
+          Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
+          break;
+        case 'warning':
+        case 'notification_warning':
+          Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning).catch(() => {});
+          break;
+        case 'error':
+        case 'notification_error':
+          Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error).catch(() => {});
+          break;
+        case 'light':
+        default:
+          Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
+          break;
+      }
+    } catch (e) {
+      console.warn('Haptics error:', e);
+    }
+  }, []);
+
+  // Sharing handler
+  const handleShare = useCallback(async (payload) => {
+    try {
+      const uri = typeof payload === 'string' ? payload : (payload?.url || payload?.uri || payload?.fileUri);
+      const dialogTitle = payload?.dialogTitle || payload?.title || 'Share';
+
+      if (uri) {
+        const isFileOrContent = uri.startsWith('file://') || uri.startsWith('content://') || uri.startsWith('/');
+        const isAvailable = await Sharing.isAvailableAsync();
+
+        if (isFileOrContent && isAvailable) {
+          await Sharing.shareAsync(uri, { dialogTitle });
+          return;
+        }
+
+        // Web URL or general share
+        await Share.share({
+          title: dialogTitle,
+          message: payload?.message ? `${payload.message} ${uri}` : uri,
+          url: uri,
+        });
+      } else if (payload?.message) {
+        await Share.share({
+          title: dialogTitle,
+          message: payload.message,
+        });
+      }
+    } catch (e) {
+      console.warn('Share error:', e);
+    }
+  }, []);
+
+  // Open browser handler
+  const handleOpenBrowser = useCallback(async (payload) => {
+    try {
+      const targetUrl = typeof payload === 'string' ? payload : (payload?.url || '');
+      if (targetUrl) {
+        await WebBrowser.openBrowserAsync(targetUrl);
+      }
+    } catch (e) {
+      console.warn('WebBrowser error:', e);
+      const fallbackUrl = typeof payload === 'string' ? payload : payload?.url;
+      if (fallbackUrl) {
+        Linking.openURL(fallbackUrl).catch(() => {});
+      }
+    }
+  }, []);
+
+  // Clipboard handler
+  const handleClipboard = useCallback(async (payload) => {
+    try {
+      const text = typeof payload === 'string' ? payload : (payload?.text || payload?.value || '');
+      await Clipboard.setStringAsync(text);
+      showToast('Copied to clipboard', 'info');
+    } catch (e) {
+      console.warn('Clipboard error:', e);
+    }
+  }, [showToast]);
+
+  // Local notification banner handler
+  const handleNotification = useCallback(async (payload) => {
+    try {
+      const title = payload?.title || (typeof payload === 'string' ? payload : 'Cinama');
+      const body = payload?.body || payload?.message || '';
+      const data = payload?.data || {};
+      await Notifications.scheduleNotificationAsync({
+        content: {
+          title,
+          body,
+          data,
+        },
+        trigger: null,
+      });
+    } catch (e) {
+      console.warn('Notification schedule error:', e);
+    }
+  }, []);
+
   // Keep screen awake while video is playing or streaming
   const setKeepAwake = useCallback(async (active) => {
     try {
@@ -443,11 +569,13 @@ export default function App() {
       const isOnline = Boolean(state.isConnected && state.isInternetReachable !== false);
       if (!isOnline) {
         wasOfflineRef.current = true;
+        setIsOffline(true);
         setHasError(true);
         setIsLoading(false);
         showToast('No internet connection', 'error');
       } else if (state.isConnected && wasOfflineRef.current) {
         wasOfflineRef.current = false;
+        setIsOffline(false);
         setHasError(false);
         showToast('Internet connection restored', 'success');
         handleRetry();
@@ -469,6 +597,29 @@ export default function App() {
       console.warn('Silent expo-updates check error:', err);
     }
   }, []);
+
+  // Explicit OTA update trigger via WebView bridge
+  const handleCheckOTA = useCallback(async (isManual = true) => {
+    if (__DEV__ || !Updates.isEnabled) {
+      if (isManual) showToast('OTA updates inactive in dev mode', 'info');
+      return;
+    }
+    try {
+      if (isManual) showToast('Checking for OTA update...', 'info');
+      const update = await Updates.checkForUpdateAsync();
+      if (update.isAvailable) {
+        if (isManual) showToast('Downloading update...', 'info');
+        await Updates.fetchUpdateAsync();
+        if (isManual) showToast('Update ready. Restarting app...', 'success');
+        await Updates.reloadAsync();
+      } else {
+        if (isManual) showToast('App is already up to date', 'success');
+      }
+    } catch (err) {
+      console.warn('OTA update error:', err);
+      if (isManual) showToast('OTA update check failed', 'error');
+    }
+  }, [showToast]);
 
   const checkForUpdates = useCallback(async (isManual = false) => {
     // 1. Silent Expo OTA update check
@@ -950,62 +1101,137 @@ export default function App() {
     }
   };
 
-  // Bidirectional communication with web player for auto horizontal orientation & offline downloads
+  // Bidirectional communication with web player for auto horizontal orientation, offline downloads & native bridge
   const handleWebViewMessage = useCallback((event) => {
     try {
       const data = event.nativeEvent.data;
       if (!data) return;
       const msg = typeof data === 'string' ? JSON.parse(data) : data;
-      if (msg && msg.type === 'SET_ORIENTATION') {
-        if (msg.orientation === 'landscape') {
-          ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.LANDSCAPE);
-          setKeepAwake(true);
-        } else if (msg.orientation === 'portrait') {
-          ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP);
-          setKeepAwake(false);
-        } else if (msg.orientation === 'unlock') {
-          ScreenOrientation.unlockAsync();
+      if (!msg) return;
+
+      const type = (msg.type || msg.action || '').toUpperCase();
+
+      switch (type) {
+        case 'HAPTICS':
+        case 'HAPTIC':
+          handleHaptics(msg.payload || msg.style || msg.impact || msg);
+          break;
+
+        case 'SHARE':
+        case 'SHARE_ASYNC':
+          handleShare(msg.payload || msg);
+          break;
+
+        case 'KEEP_AWAKE':
+        case 'SET_KEEP_AWAKE':
+          setKeepAwake(msg.active !== undefined ? Boolean(msg.active) : true);
+          break;
+
+        case 'OPEN_BROWSER':
+        case 'OPEN_URL':
+          handleOpenBrowser(msg.url || msg.payload || msg);
+          break;
+
+        case 'CLIPBOARD':
+        case 'COPY_TO_CLIPBOARD':
+        case 'SET_CLIPBOARD':
+          handleClipboard(msg.text || msg.payload || msg.value || msg);
+          break;
+
+        case 'NOTIFICATION':
+        case 'SCHEDULE_NOTIFICATION':
+        case 'SHOW_NOTIFICATION':
+          handleNotification(msg.payload || msg);
+          break;
+
+        case 'CHECK_OTA':
+          handleCheckOTA(true);
+          break;
+
+        case 'SET_ORIENTATION':
+          if (msg.orientation === 'landscape') {
+            ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.LANDSCAPE);
+            setKeepAwake(true);
+          } else if (msg.orientation === 'portrait') {
+            ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP);
+            setKeepAwake(false);
+          } else if (msg.orientation === 'unlock') {
+            ScreenOrientation.unlockAsync();
+          }
+          break;
+
+        case 'VIDEO_PLAYING':
+          setKeepAwake(Boolean(msg.isPlaying));
+          break;
+
+        case 'MODAL_STATE':
+          isWebModalOpenRef.current = !!msg.isOpen;
+          if (msg.modal === 'player') {
+            setKeepAwake(Boolean(msg.isOpen));
+          }
+          break;
+
+        case 'START_OFFLINE_DOWNLOAD':
+          startOfflineDownload(msg.payload);
+          break;
+
+        case 'OPEN_DOWNLOADS':
+          setIsDownloadsModalVisible(true);
+          setDownloadsTab('completed');
+          break;
+
+        case 'START_APP_UPDATE': {
+          const info = msg.payload || updateInfo;
+          const downloadPath = (info && info.download_url) || '/downloads/cinema.apk';
+          const browserUrl = downloadPath.startsWith('http')
+            ? downloadPath
+            : `${DEFAULT_SERVER_URL.replace(/\/+$/, '')}/${downloadPath.replace(/^\/+/, '')}`;
+          Linking.openURL(browserUrl).catch(() => {});
+          break;
         }
-      } else if (msg && msg.type === 'VIDEO_PLAYING') {
-        setKeepAwake(Boolean(msg.isPlaying));
-      } else if (msg && msg.type === 'KEEP_AWAKE') {
-        setKeepAwake(Boolean(msg.active));
-      } else if (msg && msg.type === 'MODAL_STATE') {
-        isWebModalOpenRef.current = !!msg.isOpen;
-        if (msg.modal === 'player') {
-          setKeepAwake(Boolean(msg.isOpen));
-        }
-      } else if (msg && msg.type === 'START_OFFLINE_DOWNLOAD') {
-        startOfflineDownload(msg.payload);
-      } else if (msg && msg.type === 'OPEN_DOWNLOADS') {
-        setIsDownloadsModalVisible(true);
-        setDownloadsTab('completed');
-      } else if (msg && msg.type === 'START_APP_UPDATE') {
-        const info = msg.payload || updateInfo;
-        const downloadPath = (info && info.download_url) || '/downloads/cinema.apk';
-        const browserUrl = downloadPath.startsWith('http')
-          ? downloadPath
-          : `${DEFAULT_SERVER_URL.replace(/\/+$/, '')}/${downloadPath.replace(/^\/+/, '')}`;
-        Linking.openURL(browserUrl).catch(() => {});
-      } else if (msg && msg.type === 'CHECK_FOR_UPDATES') {
-        checkForUpdates(true);
-      } else if (msg && msg.type === 'SET_NOTIFICATION_PREFERENCE') {
-        handleSetNotificationPreference(Boolean(msg.enabled));
-      } else if (msg && msg.type === 'CHECK_NOTIFICATION_PERMISSION') {
-        if (Platform.OS === 'android' && Platform.Version >= 33) {
-          PermissionsAndroid.check(PermissionsAndroid.PERMISSIONS.POST_NOTIFICATIONS)
-            .then((granted) => sendNotificationStatusToWeb(granted))
-            .catch(() => sendNotificationStatusToWeb(false));
-        } else {
-          sendNotificationStatusToWeb(true);
-        }
-      } else if (msg && msg.type === 'OPEN_APP_SETTINGS') {
-        Linking.openSettings().catch(() => {});
+
+        case 'CHECK_FOR_UPDATES':
+          checkForUpdates(true);
+          break;
+
+        case 'SET_NOTIFICATION_PREFERENCE':
+          handleSetNotificationPreference(Boolean(msg.enabled));
+          break;
+
+        case 'CHECK_NOTIFICATION_PERMISSION':
+          if (Platform.OS === 'android' && Platform.Version >= 33) {
+            PermissionsAndroid.check(PermissionsAndroid.PERMISSIONS.POST_NOTIFICATIONS)
+              .then((granted) => sendNotificationStatusToWeb(granted))
+              .catch(() => sendNotificationStatusToWeb(false));
+          } else {
+            sendNotificationStatusToWeb(true);
+          }
+          break;
+
+        case 'OPEN_APP_SETTINGS':
+          Linking.openSettings().catch(() => {});
+          break;
+
+        default:
+          break;
       }
     } catch (err) {
       console.warn('WebView message error:', err);
     }
-  }, [startOfflineDownload, startDownload, updateInfo, checkForUpdates, handleSetNotificationPreference, sendNotificationStatusToWeb, setKeepAwake]);
+  }, [
+    handleHaptics,
+    handleShare,
+    setKeepAwake,
+    handleOpenBrowser,
+    handleClipboard,
+    handleNotification,
+    handleCheckOTA,
+    startOfflineDownload,
+    updateInfo,
+    checkForUpdates,
+    handleSetNotificationPreference,
+    sendNotificationStatusToWeb,
+  ]);
 
   const handleContentProcessDidTerminate = useCallback(() => {
     if (webViewRef.current) {
@@ -1046,7 +1272,7 @@ export default function App() {
           key={`cinema-wv-${sessionKey}`}
           source={{ uri: DEFAULT_SERVER_URL }}
           style={styles.webView}
-          applicationNameForUserAgent="CinamaApp/1.0.9"
+          applicationNameForUserAgent="CinamaApp/1.1.0"
           setSupportMultipleWindows={false}
           injectedJavaScriptBeforeContentLoaded={`
             window.isCinamaNativeApp = true;
@@ -1055,6 +1281,32 @@ export default function App() {
             window.isCinemaApp = true;
             window.CINAMA_APP_VERSION = '${CURRENT_APP_VERSION}';
             window.CINEMA_APP_VERSION = '${CURRENT_APP_VERSION}';
+            window.EXPO_RUNTIME_VERSION = '1.0.0';
+
+            window.CinamaBridge = {
+              haptics: function(style) {
+                try { window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'HAPTICS', style: style || 'light' })); } catch(e) {}
+              },
+              share: function(payload) {
+                try { window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'SHARE', payload: payload })); } catch(e) {}
+              },
+              keepAwake: function(active) {
+                try { window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'KEEP_AWAKE', active: active !== false })); } catch(e) {}
+              },
+              openBrowser: function(url) {
+                try { window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'OPEN_BROWSER', url: url })); } catch(e) {}
+              },
+              clipboard: function(text) {
+                try { window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'CLIPBOARD', text: text })); } catch(e) {}
+              },
+              notification: function(notif) {
+                try { window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'NOTIFICATION', payload: notif })); } catch(e) {}
+              },
+              checkOTA: function() {
+                try { window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'CHECK_OTA' })); } catch(e) {}
+              }
+            };
+            window.CinemaBridge = window.CinamaBridge;
             true;
           `}
           injectedJavaScript={`
@@ -1211,9 +1463,13 @@ export default function App() {
                 <Feather name="wifi-off" size={32} color="#94a3b8" />
               </View>
 
-              <Text style={styles.errorHeading}>Server Offline</Text>
+              <Text style={styles.errorHeading}>
+                {isOffline ? 'You Are Offline' : 'Connection Error'}
+              </Text>
               <Text style={styles.errorSubtext}>
-                No internet connection or server unreachable.
+                {isOffline
+                  ? 'No internet connection detected. You can watch your downloaded movies and series offline.'
+                  : 'Unable to reach the server. Please check your connection and retry.'}
               </Text>
 
               <View style={styles.offlineActionsWrapper}>
@@ -1624,8 +1880,16 @@ const styles = StyleSheet.create({
     color: '#f8fafc',
     fontSize: 20,
     fontWeight: '700',
-    marginBottom: 24,
+    marginBottom: 8,
     textAlign: 'center',
+  },
+  errorSubtext: {
+    color: '#94a3b8',
+    fontSize: 13,
+    textAlign: 'center',
+    lineHeight: 20,
+    marginBottom: 24,
+    maxWidth: 280,
   },
   retryButton: {
     backgroundColor: '#f8fafc',
