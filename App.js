@@ -253,6 +253,8 @@ export default function App() {
       setDownloadedSizeText('0 MB / 0 MB');
       setUpdateStatusText('New update found, downloading in background...');
 
+      if (isUpdatingRef.current) return;
+      isUpdatingRef.current = true;
       const localApkPath = `${FileSystem.cacheDirectory}cinema_update.apk`;
 
       // Remove any stale cache file before initiating download
@@ -271,15 +273,16 @@ export default function App() {
             localApkPath,
             {},
             (downloadProgress) => {
-              const total = downloadProgress.totalBytesExpectedToWrite;
-              const written = downloadProgress.totalBytesWritten;
-              if (total > 0) {
-                const percent = Math.min(100, Math.max(0, Math.round((written / total) * 100)));
-                setUpdateProgress(percent);
-                const writtenMB = (written / (1024 * 1024)).toFixed(1);
-                const totalMB = (total / (1024 * 1024)).toFixed(1);
-                setDownloadedSizeText(`${writtenMB} MB / ${totalMB} MB`);
+              const written = downloadProgress.totalBytesWritten || 0;
+              let total = downloadProgress.totalBytesExpectedToWrite;
+              if (!total || total <= 0) {
+                total = 70.6 * 1024 * 1024;
               }
+              const percent = Math.min(100, Math.max(0, Math.round((written / total) * 100)));
+              setUpdateProgress(percent);
+              const writtenMB = (written / (1024 * 1024)).toFixed(1);
+              const totalMB = (total / (1024 * 1024)).toFixed(1);
+              setDownloadedSizeText(`${writtenMB} MB / ${totalMB} MB`);
             }
           );
           downloadResumableRef.current = downloadResumable;
@@ -307,6 +310,8 @@ export default function App() {
       setUpdateState('error');
       setDownloadError(err.message || 'Update download failed');
       setUpdateStatusText('Could not complete update download');
+    } finally {
+      isUpdatingRef.current = false;
     }
   };
 
@@ -424,7 +429,9 @@ export default function App() {
       const data = await response.json();
       if (data && isNewerVersion(data.version, CURRENT_APP_VERSION)) {
         setUpdateInfo(data);
-        startDownload(data);
+        if (data.auto_update === true || data.force_update === true || isManual) {
+          startDownload(data);
+        }
       } else if (isManual) {
         showToast(`You are on the latest version (v${CURRENT_APP_VERSION})`, 'success');
       }
