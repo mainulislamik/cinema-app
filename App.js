@@ -825,6 +825,18 @@ export default function App() {
         }
       } else if (msg && msg.type === 'CHECK_FOR_UPDATES') {
         checkForUpdates(true);
+      } else if (msg && msg.type === 'SET_NOTIFICATION_PREFERENCE') {
+        if (msg.enabled && Platform.OS === 'android' && Platform.Version >= 33) {
+          PermissionsAndroid.request(
+            PermissionsAndroid.PERMISSIONS.POST_NOTIFICATIONS,
+            {
+              title: 'Allow Notifications',
+              message: 'Cinema would like to send you download and update alerts.',
+              buttonPositive: 'Allow',
+              buttonNegative: 'Not Now',
+            }
+          ).catch(() => {});
+        }
       }
     } catch (err) {
       console.warn('WebView message error:', err);
