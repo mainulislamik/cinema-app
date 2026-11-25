@@ -12,7 +12,6 @@
     },
     "android": {
       "versionCode": 11,
-      "usesCleartextTraffic": true,
       "allowBackup": false,
       "adaptiveIcon": {
         "foregroundImage": "./assets/android-icon-foreground.png",
