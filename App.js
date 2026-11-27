@@ -624,22 +624,31 @@ export default function App() {
 
     await ensureDownloadsDirectory();
 
+    // Defensively resolve relative URLs (e.g. /api/v/stream/...) to absolute HTTP/HTTPS
+    let downloadUrl = payload.url;
+    if (typeof downloadUrl === 'string' && (downloadUrl.startsWith('/') || !downloadUrl.startsWith('http'))) {
+      const base = (serverUrl || DEFAULT_SERVER_URL).replace(/\/+$/, '');
+      downloadUrl = `${base}${downloadUrl.startsWith('/') ? '' : '/'}${downloadUrl}`;
+    }
+
     const id = payload.id || `dl_${Date.now()}`;
     const safeTitle = (payload.title || 'media').replace(/[^a-zA-Z0-9_\-\.]/g, '_').substring(0, 40);
     const fileUri = payload.fileUri || `${DOWNLOADS_DIR}${safeTitle}_${payload.resolution || 'HD'}_${Date.now()}.mp4`;
+
+    const expectedTotal = payload.totalBytes || payload.size_bytes || 0;
 
     const newItem = {
       id,
       title: payload.title || 'Untitled',
       subtitle: payload.subtitle || null,
       poster: payload.poster || null,
-      url: payload.url,
+      url: downloadUrl,
       resolution: payload.resolution || 'HD',
       sizeText: payload.size || 'HD',
       fileUri,
       progress: payload.progress || 0,
       downloadedBytes: payload.downloadedBytes || 0,
-      totalBytes: payload.totalBytes || 0,
+      totalBytes: expectedTotal,
       speedText: 'Starting...',
       status: 'downloading',
       createdAt: payload.createdAt || Date.now(),
@@ -657,9 +666,10 @@ export default function App() {
     let lastTime = Date.now();
 
     const callback = (downloadProgress) => {
-      const totalBytes = downloadProgress.totalBytesExpectedToWrite;
+      const rawExpected = downloadProgress.totalBytesExpectedToWrite;
+      const totalBytes = rawExpected > 0 ? rawExpected : expectedTotal;
       const writtenBytes = downloadProgress.totalBytesWritten;
-      const progress = totalBytes > 0 ? writtenBytes / totalBytes : 0;
+      const progress = totalBytes > 0 ? Math.min(1, writtenBytes / totalBytes) : 0;
 
       const now = Date.now();
       const timeDiff = (now - lastTime) / 1000;
@@ -697,9 +707,13 @@ export default function App() {
 
     try {
       const downloadResumable = FileSystem.createDownloadResumable(
-        payload.url,
+        downloadUrl,
         fileUri,
-        {},
+        {
+          headers: {
+            'User-Agent': 'CinamaApp/1.0.5',
+          },
+        },
         callback
       );
       activeTasksRef.current[id] = downloadResumable;
@@ -850,7 +864,7 @@ export default function App() {
       await IntentLauncher.startActivityAsync('android.intent.action.VIEW', {
         data: contentUri,
         type: 'video/*',
-        flags: 1, // FLAG_GRANT_READ_URI_PERMISSION
+        flags: 268435457, // 1 (FLAG_GRANT_READ_URI_PERMISSION) | 268435456 (FLAG_ACTIVITY_NEW_TASK)
       });
     } catch (err) {
       console.warn('Playback launch error:', err);
