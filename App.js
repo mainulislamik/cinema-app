@@ -36,13 +36,38 @@ const STORAGE_KEY = '@cinema_server_url';
 const DEFAULT_SERVER_URL = 'https://cinama.xyz';
 const CURRENT_APP_VERSION = '1.1.0';
 const OFFLINE_DOWNLOADS_KEY = '@cinema_offline_downloads_v1';
-const getDownloadsDir = () => {
+const NOTIF_ASKED_KEY = '@cinema_notif_asked';
+
+const getVaultDir = () => {
   const base = FileSystem.documentDirectory || FileSystem.cacheDirectory || '';
   if (!base) return '';
   const cleanBase = base.endsWith('/') ? base : `${base}/`;
-  return `${cleanBase}downloads/`;
+  return `${cleanBase}vault/`;
 };
-const NOTIF_ASKED_KEY = '@cinema_notif_asked';
+
+const formatSpeed = (bytesPerSecond) => {
+  if (!bytesPerSecond || bytesPerSecond <= 0) return '0 KB/s';
+  if (bytesPerSecond >= 1024 * 1024) {
+    return `${(bytesPerSecond / (1024 * 1024)).toFixed(1)} MB/s`;
+  }
+  if (bytesPerSecond >= 1024) {
+    return `${Math.round(bytesPerSecond / 1024)} KB/s`;
+  }
+  return `${Math.round(bytesPerSecond)} B/s`;
+};
+
+const formatETA = (seconds) => {
+  if (!seconds || !isFinite(seconds) || seconds <= 0) return '';
+  if (seconds < 60) return `${Math.round(seconds)}s left`;
+  if (seconds < 3600) {
+    const mins = Math.floor(seconds / 60);
+    const secs = Math.round(seconds % 60);
+    return `${mins}m ${secs}s left`;
+  }
+  const hours = Math.floor(seconds / 3600);
+  const mins = Math.floor((seconds % 3600) / 60);
+  return `${hours}h ${mins}m left`;
+};
 
 const isNewerVersion = (remoteVer, currentVer) => {
   if (!remoteVer || typeof remoteVer !== 'string') return false;
@@ -592,21 +617,29 @@ export default function App() {
     }
   }, []);
 
-  // Ensure downloads directory exists
+  // Ensure downloads vault directory exists with .nomedia protection
   const ensureDownloadsDirectory = async () => {
     try {
       const base = FileSystem.documentDirectory || FileSystem.cacheDirectory || '';
       if (!base) return '';
       const cleanBase = base.endsWith('/') ? base : `${base}/`;
-      const dir = `${cleanBase}downloads/`;
+      const dir = `${cleanBase}vault/`;
       const dirNoSlash = dir.replace(/\/+$/, '');
       const dirInfo = await FileSystem.getInfoAsync(dirNoSlash);
       if (!dirInfo.exists) {
         await FileSystem.makeDirectoryAsync(dirNoSlash, { intermediates: true });
       }
+      // Create .nomedia so Android MediaStore, Gallery, MX Player and VLC ignore all files
+      try {
+        const nomediaPath = `${dir}.nomedia`;
+        const nomediaInfo = await FileSystem.getInfoAsync(nomediaPath);
+        if (!nomediaInfo.exists) {
+          await FileSystem.writeAsStringAsync(nomediaPath, '');
+        }
+      } catch (_) {}
       return dir;
     } catch (e) {
-      console.warn('Error creating downloads directory, falling back to base:', e);
+      console.warn('Error creating vault directory, falling back to base:', e);
       const base = FileSystem.documentDirectory || FileSystem.cacheDirectory || '';
       return base.endsWith('/') ? base : `${base}/`;
     }
@@ -715,8 +748,8 @@ export default function App() {
       .replace(/^_+|_+$/g, '')
       .substring(0, 40) || 'media';
 
-    const safeFn = `${safeTitle}_${payload.resolution || 'HD'}.mp4`;
-    const downloadUrl = resolveAbsoluteDownloadUrl(payload.url, safeFn);
+    const safeFn = `${safeTitle}_${payload.resolution || 'HD'}.mbx`;
+    const downloadUrl = resolveAbsoluteDownloadUrl(payload.url, `${safeTitle}_${payload.resolution || 'HD'}.mp4`);
 
     const expectedTotal = Number(payload.totalBytes || payload.size_bytes) || 0;
 
@@ -971,8 +1004,8 @@ export default function App() {
       .replace(/_+/g, '_')
       .replace(/^_+|_+$/g, '')
       .substring(0, 40) || 'media';
-    const safeFn = `${safeTitle}_${item.resolution || 'HD'}.mp4`;
-    const resolvedUrl = resolveAbsoluteDownloadUrl(item.url, safeFn);
+    const safeFn = `${safeTitle}_${item.resolution || 'HD'}.mbx`;
+    const resolvedUrl = resolveAbsoluteDownloadUrl(item.url, `${safeTitle}_${item.resolution || 'HD'}.mp4`);
 
     setDownloads((prev) =>
       prev.map((d) =>
@@ -1047,6 +1080,13 @@ export default function App() {
 
   const launchExternalPlayer = useCallback(async (item) => {
     if (!item || !item.fileUri) return;
+    if (item.fileUri.includes('vault') || item.fileUri.endsWith('.mbx')) {
+      Alert.alert(
+        'Cinema Vault Protected',
+        'This movie is saved in your secure In-App Vault. To protect offline media, it can only be played directly inside Cinema Mobile.'
+      );
+      return;
+    }
     try {
       const contentUri = await FileSystem.getContentUriAsync(item.fileUri);
       await IntentLauncher.startActivityAsync('android.intent.action.VIEW', {
@@ -1429,10 +1469,10 @@ export default function App() {
           <View style={styles.dlHeader}>
             <View style={{ flex: 1 }}>
               <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-                <Feather name="download" size={20} color="#38bdf8" />
-                <Text style={styles.dlHeaderTitle}>Offline Downloads</Text>
+                <Feather name="shield" size={20} color="#10b981" />
+                <Text style={styles.dlHeaderTitle}>Cinema In-App Vault</Text>
               </View>
-              <Text style={styles.dlHeaderSubtitle}>Watch your movies & series without internet</Text>
+              <Text style={styles.dlHeaderSubtitle}>Protected offline storage • Zero external access</Text>
             </View>
             <TouchableOpacity
               style={styles.dlCloseBtn}
@@ -1447,11 +1487,11 @@ export default function App() {
           <View style={styles.storageCard}>
             <View style={styles.storageInfoRow}>
               <View style={styles.storageLabelGroup}>
-                <Feather name="hard-drive" size={13} color="#38bdf8" />
-                <Text style={styles.storageLabel}>Device Storage</Text>
+                <Feather name="shield" size={13} color="#10b981" />
+                <Text style={styles.storageLabel}>In-App Vault Storage</Text>
               </View>
               <Text style={styles.storageValues}>
-                Cinama: <Text style={{ color: '#38bdf8', fontWeight: 'bold' }}>{storageInfo.usedMB} MB</Text> • Free: {storageInfo.freeGB} GB
+                Vault: <Text style={{ color: '#10b981', fontWeight: 'bold' }}>{storageInfo.usedMB} MB</Text> • Free: {storageInfo.freeGB} GB
               </Text>
             </View>
             <View style={styles.storageTrack}>
@@ -1472,12 +1512,12 @@ export default function App() {
               activeOpacity={0.8}
             >
               <Feather
-                name="check-circle"
+                name="shield"
                 size={15}
-                color={downloadsTab === 'completed' ? '#38bdf8' : '#64748b'}
+                color={downloadsTab === 'completed' ? '#10b981' : '#64748b'}
               />
-              <Text style={[styles.dlTabText, downloadsTab === 'completed' && styles.dlTabTextActive]}>
-                Downloaded ({completedList.length})
+              <Text style={[styles.dlTabText, downloadsTab === 'completed' && { color: '#10b981', fontWeight: '700' }]}>
+                Offline Vault ({completedList.length})
               </Text>
             </TouchableOpacity>
 
@@ -1535,6 +1575,9 @@ export default function App() {
                       <View style={styles.dlBadgesRow}>
                         <View style={styles.dlQualityBadge}>
                           <Text style={styles.dlQualityText}>{item.resolution}</Text>
+                        </View>
+                        <View style={[styles.dlQualityBadge, { backgroundColor: 'rgba(16, 185, 129, 0.15)', borderColor: 'rgba(16, 185, 129, 0.4)' }]}>
+                          <Text style={[styles.dlQualityText, { color: '#10b981' }]}>In-App Vault</Text>
                         </View>
                         {item.fileSize ? (
                           <Text style={styles.dlSizeText}>
@@ -1719,14 +1762,10 @@ export default function App() {
               ) : null}
             </View>
 
-            <TouchableOpacity
-              onPress={() => launchExternalPlayer(offlinePlayingItem)}
-              style={styles.offlinePlayerExternalBtn}
-              activeOpacity={0.7}
-            >
-              <Feather name="external-link" size={15} color="#38bdf8" style={{ marginRight: 4 }} />
-              <Text style={styles.offlinePlayerExternalText}>External</Text>
-            </TouchableOpacity>
+            <View style={styles.offlinePlayerShieldBadge}>
+              <Feather name="shield" size={13} color="#10b981" style={{ marginRight: 4 }} />
+              <Text style={styles.offlinePlayerShieldText}>Vault Protected</Text>
+            </View>
           </View>
 
           <View style={styles.offlinePlayerBody}>
@@ -1761,13 +1800,14 @@ export default function App() {
 </head>
 <body>
   <video
-    src="${offlinePlayingItem.fileUri}"
     controls
     autoplay
     playsinline
     webkit-playsinline
     controlsList="nodownload"
-  ></video>
+  >
+    <source src="${offlinePlayingItem.fileUri}" type="video/mp4" />
+  </video>
 </body>
 </html>`,
                 }}
@@ -2579,6 +2619,21 @@ const styles = StyleSheet.create({
   offlinePlayerQualityText: {
     color: '#38bdf8',
     fontSize: 9,
+    fontWeight: '700',
+  },
+  offlinePlayerShieldBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(16, 185, 129, 0.15)',
+    paddingVertical: 5,
+    paddingHorizontal: 10,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: 'rgba(16, 185, 129, 0.4)',
+  },
+  offlinePlayerShieldText: {
+    color: '#10b981',
+    fontSize: 11,
     fontWeight: '700',
   },
   offlinePlayerExternalBtn: {
