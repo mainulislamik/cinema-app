@@ -580,13 +580,11 @@ export default function App() {
         ]);
         return true;
       } else {
-        const statuses = await PermissionsAndroid.requestMultiple([
+        await PermissionsAndroid.requestMultiple([
           PermissionsAndroid.PERMISSIONS.WRITE_EXTERNAL_STORAGE,
           PermissionsAndroid.PERMISSIONS.READ_EXTERNAL_STORAGE,
         ]);
-        return (
-          statuses[PermissionsAndroid.PERMISSIONS.WRITE_EXTERNAL_STORAGE] === PermissionsAndroid.RESULTS.GRANTED
-        );
+        return true; // App-internal storage (FileSystem.documentDirectory) never requires WRITE_EXTERNAL_STORAGE permission
       }
     } catch (e) {
       console.warn('Storage permission error:', e);
@@ -651,33 +649,6 @@ export default function App() {
     }
   }, [refreshStorageInfo]);
 
-  // Load offline downloads on mount
-  useEffect(() => {
-    const initDownloads = async () => {
-      try {
-        await ensureDownloadsDirectory();
-        const stored = await AsyncStorage.getItem(OFFLINE_DOWNLOADS_KEY);
-        if (stored) {
-          const parsed = JSON.parse(stored);
-          // If app was terminated while downloading, reset stuck 'downloading' states to 'paused'
-          const sanitized = Array.isArray(parsed)
-            ? parsed.map((item) => {
-                if (item.status === 'downloading') {
-                  return { ...item, status: 'paused', speedText: 'Paused' };
-                }
-                return item;
-              })
-            : [];
-          setDownloads(sanitized);
-          refreshStorageInfo(sanitized);
-        }
-      } catch (err) {
-        console.warn('Failed to load offline downloads:', err);
-      }
-    };
-    initDownloads();
-  }, [refreshStorageInfo]);
-
   // Defensively resolve relative URLs to full absolute HTTP/HTTPS URL with optional filename
   const resolveAbsoluteDownloadUrl = useCallback((rawUrl, filename = '') => {
     if (!rawUrl || typeof rawUrl !== 'string') return '';
@@ -691,6 +662,44 @@ export default function App() {
     }
     return target;
   }, []);
+
+  // Load offline downloads on mount
+  useEffect(() => {
+    const initDownloads = async () => {
+      try {
+        await ensureDownloadsDirectory();
+        const stored = await AsyncStorage.getItem(OFFLINE_DOWNLOADS_KEY);
+        if (stored) {
+          const parsed = JSON.parse(stored);
+          // If app was terminated while downloading, reset stuck 'downloading' states to 'paused'
+          // And automatically heal any relative URLs or corrupt filenames
+          const sanitized = Array.isArray(parsed)
+            ? parsed.map((item) => {
+                const safeTitle = (item.title || 'media')
+                  .replace(/[^a-zA-Z0-9_\-]/g, '_')
+                  .replace(/_+/g, '_')
+                  .replace(/^_+|_+$/g, '')
+                  .substring(0, 40) || 'media';
+                const safeFn = `${safeTitle}_${item.resolution || 'HD'}.mp4`;
+                const healedUrl = resolveAbsoluteDownloadUrl(item.url, safeFn);
+                const isDownloading = item.status === 'downloading';
+                return {
+                  ...item,
+                  url: healedUrl,
+                  status: isDownloading ? 'paused' : item.status,
+                  speedText: isDownloading ? 'Paused' : item.speedText,
+                };
+              })
+            : [];
+          setDownloads(sanitized);
+          refreshStorageInfo(sanitized);
+        }
+      } catch (err) {
+        console.warn('Failed to load offline downloads:', err);
+      }
+    };
+    initDownloads();
+  }, [refreshStorageInfo, resolveAbsoluteDownloadUrl]);
 
   // Start offline download with resumable progress tracking
   const startOfflineDownload = useCallback(async (payload) => {
@@ -719,7 +728,7 @@ export default function App() {
       targetDir = base.endsWith('/') ? base : `${base}/`;
     }
 
-    const fileUri = payload.fileUri || `${targetDir}${safeFn}`;
+    const fileUri = `${targetDir}${safeFn}`;
 
     const newItem = {
       id,
@@ -791,6 +800,7 @@ export default function App() {
             if (item.id === id) {
               return {
                 ...item,
+                status: 'downloading',
                 progress,
                 downloadedBytes: writtenBytes,
                 totalBytes,
@@ -956,11 +966,28 @@ export default function App() {
       delete activeTasksRef.current[id];
     }
 
+    const safeTitle = (item.title || 'media')
+      .replace(/[^a-zA-Z0-9_\-]/g, '_')
+      .replace(/_+/g, '_')
+      .replace(/^_+|_+$/g, '')
+      .substring(0, 40) || 'media';
+    const safeFn = `${safeTitle}_${item.resolution || 'HD'}.mp4`;
+    const resolvedUrl = resolveAbsoluteDownloadUrl(item.url, safeFn);
+
+    setDownloads((prev) =>
+      prev.map((d) =>
+        d.id === id
+          ? { ...d, status: 'downloading', speedText: 'Connecting...', url: resolvedUrl }
+          : d
+      )
+    );
+
     startOfflineDownload({
       ...item,
+      url: resolvedUrl,
       resumeData: item.resumeData || resumeDataRef.current[id] || null,
     });
-  }, [downloads, startOfflineDownload]);
+  }, [downloads, startOfflineDownload, resolveAbsoluteDownloadUrl]);
 
   const cancelDownload = useCallback(async (id) => {
     const task = activeTasksRef.current[id];
@@ -1622,9 +1649,16 @@ export default function App() {
                           <TouchableOpacity
                             style={[styles.controlPillBtn, { borderColor: '#10b98140' }]}
                             onPress={() => {
-                              if (item.url) {
-                                Linking.openURL(item.url).catch(() => {});
-                                showToast('Opening system download to phone...', 'info');
+                              const safeFn = `${(item.title || 'media').replace(/[^a-zA-Z0-9_\-]/g, '_')}_${item.resolution || 'HD'}.mp4`;
+                              const directUrl = resolveAbsoluteDownloadUrl(item.url, safeFn);
+                              if (directUrl) {
+                                showToast('Opening system download in browser...', 'info');
+                                Linking.openURL(directUrl).catch((err) => {
+                                  console.warn('Linking error:', err);
+                                  showToast('Failed to open external download', 'error');
+                                });
+                              } else {
+                                showToast('Download link not available', 'error');
                               }
                             }}
                             activeOpacity={0.8}
