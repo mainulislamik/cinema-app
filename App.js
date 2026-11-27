@@ -56,6 +56,16 @@ const formatSpeed = (bytesPerSecond) => {
   return `${Math.round(bytesPerSecond)} B/s`;
 };
 
+const cleanMediaTitle = (rawTitle) => {
+  if (!rawTitle || typeof rawTitle !== 'string') return 'Media';
+  let t = rawTitle
+    .replace(/\[\s*(?:1080p|720p|480p|4k|2160p|hevc|x264|x265|web-?dl|bluray|hindi|bengali|bangla|dual\s*audio)[^\]]*\]/gi, '')
+    .replace(/\(\s*(?:1080p|720p|480p|4k|2160p|hevc|x264|x265|web-?dl|bluray)[^)]*\)/gi, '')
+    .replace(/[\[\(\-\_\|\:\s]+$/, '')
+    .trim();
+  return t || rawTitle;
+};
+
 const formatETA = (seconds) => {
   if (!seconds || !isFinite(seconds) || seconds <= 0) return '';
   if (seconds < 60) return `${Math.round(seconds)}s left`;
@@ -1772,11 +1782,11 @@ export default function App() {
                     <View style={styles.dlCard}>
                       <View style={styles.dlCardInfo}>
                         <View style={styles.dlDownloadingHeader}>
-                          <Text style={styles.dlCardTitle} numberOfLines={1}>
-                            {item.title}
+                          <Text style={styles.dlDownloadingTitle} numberOfLines={1} ellipsizeMode="tail">
+                            {cleanMediaTitle(item.title)}
                           </Text>
                           <View style={styles.dlQualityBadge}>
-                            <Text style={styles.dlQualityText}>{item.resolution}</Text>
+                            <Text style={styles.dlQualityText}>{item.resolution || 'HD'}</Text>
                           </View>
                         </View>
 
@@ -1794,10 +1804,14 @@ export default function App() {
 
                         {/* Progress Meta */}
                         <View style={styles.progressMetaRow}>
-                          <Text style={styles.progressPercentText}>{progressLabel}</Text>
-                          <Text style={[styles.progressSpeedText, isError && { color: '#ef4444' }]}>
-                            {statusText}
+                          <Text style={styles.progressPercentText} numberOfLines={1} ellipsizeMode="tail">
+                            {progressLabel}
                           </Text>
+                          <View style={styles.progressSpeedWrap}>
+                            <Text style={[styles.progressSpeedText, isError && { color: '#ef4444' }]} numberOfLines={1}>
+                              {statusText}
+                            </Text>
+                          </View>
                         </View>
 
                         {/* Controls */}
@@ -2513,16 +2527,17 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     backgroundColor: '#0f172a',
     borderRadius: 12,
-    padding: 12,
+    padding: 14,
     borderWidth: 1,
     borderColor: '#1e293b',
-    gap: 12,
+    overflow: 'hidden',
   },
   dlPoster: {
     width: 64,
     height: 90,
     borderRadius: 8,
     backgroundColor: '#1e293b',
+    marginRight: 12,
   },
   dlPosterPlaceholder: {
     alignItems: 'center',
@@ -2530,6 +2545,7 @@ const styles = StyleSheet.create({
   },
   dlCardInfo: {
     flex: 1,
+    minWidth: 0,
     justifyContent: 'center',
   },
   dlCardTitle: {
@@ -2537,6 +2553,14 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: '700',
     marginBottom: 2,
+  },
+  dlDownloadingTitle: {
+    flex: 1,
+    minWidth: 0,
+    color: '#f8fafc',
+    fontSize: 14,
+    fontWeight: '700',
+    marginRight: 10,
   },
   dlCardSubtitle: {
     color: '#94a3b8',
@@ -2550,17 +2574,21 @@ const styles = StyleSheet.create({
     marginBottom: 10,
   },
   dlQualityBadge: {
+    flexShrink: 0,
     backgroundColor: '#10b98120',
     borderColor: '#10b98140',
     borderWidth: 1,
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-    borderRadius: 4,
+    paddingHorizontal: 8,
+    paddingVertical: 2.5,
+    borderRadius: 5,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   dlQualityText: {
     color: '#10b981',
-    fontSize: 10,
-    fontWeight: 'bold',
+    fontSize: 10.5,
+    fontWeight: '800',
+    letterSpacing: 0.2,
   },
   dlSizeText: {
     color: '#64748b',
@@ -2595,6 +2623,7 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     alignItems: 'center',
     marginBottom: 8,
+    width: '100%',
   },
   progressBarTrack: {
     height: 6,
@@ -2613,15 +2642,25 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     alignItems: 'center',
     marginBottom: 8,
+    width: '100%',
   },
   progressPercentText: {
+    flex: 1,
+    minWidth: 0,
     color: '#38bdf8',
     fontSize: 11,
     fontWeight: '700',
+    marginRight: 10,
+  },
+  progressSpeedWrap: {
+    flexShrink: 0,
+    alignItems: 'flex-end',
   },
   progressSpeedText: {
     color: '#94a3b8',
     fontSize: 11,
+    fontWeight: '600',
+    textAlign: 'right',
   },
   dlControlsRow: {
     flexDirection: 'row',
