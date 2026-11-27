@@ -38,7 +38,8 @@ const CURRENT_APP_VERSION = '1.1.0';
 const OFFLINE_DOWNLOADS_KEY = '@cinema_offline_downloads_v1';
 const getDownloadsDir = () => {
   const base = FileSystem.documentDirectory || FileSystem.cacheDirectory || '';
-  const cleanBase = base ? (base.endsWith('/') ? base : `${base}/`) : '';
+  if (!base) return '';
+  const cleanBase = base.endsWith('/') ? base : `${base}/`;
   return `${cleanBase}downloads/`;
 };
 const NOTIF_ASKED_KEY = '@cinema_notif_asked';
@@ -553,19 +554,48 @@ export default function App() {
     }, 1200);
   }, [handleRetry]);
 
+  // Request storage / media permissions on Android
+  const requestStoragePermission = useCallback(async () => {
+    if (Platform.OS !== 'android') return true;
+    try {
+      if (Platform.Version >= 33) {
+        await PermissionsAndroid.requestMultiple([
+          'android.permission.READ_MEDIA_VIDEO',
+          'android.permission.READ_MEDIA_IMAGES',
+        ]);
+        return true;
+      } else {
+        const statuses = await PermissionsAndroid.requestMultiple([
+          PermissionsAndroid.PERMISSIONS.WRITE_EXTERNAL_STORAGE,
+          PermissionsAndroid.PERMISSIONS.READ_EXTERNAL_STORAGE,
+        ]);
+        return (
+          statuses[PermissionsAndroid.PERMISSIONS.WRITE_EXTERNAL_STORAGE] === PermissionsAndroid.RESULTS.GRANTED
+        );
+      }
+    } catch (e) {
+      console.warn('Storage permission error:', e);
+      return true;
+    }
+  }, []);
+
   // Ensure downloads directory exists
   const ensureDownloadsDirectory = async () => {
     try {
-      const dir = getDownloadsDir();
-      if (!dir) return null;
-      const dirInfo = await FileSystem.getInfoAsync(dir);
+      const base = FileSystem.documentDirectory || FileSystem.cacheDirectory || '';
+      if (!base) return '';
+      const cleanBase = base.endsWith('/') ? base : `${base}/`;
+      const dir = `${cleanBase}downloads/`;
+      const dirNoSlash = dir.replace(/\/+$/, '');
+      const dirInfo = await FileSystem.getInfoAsync(dirNoSlash);
       if (!dirInfo.exists) {
-        await FileSystem.makeDirectoryAsync(dir, { intermediates: true });
+        await FileSystem.makeDirectoryAsync(dirNoSlash, { intermediates: true });
       }
       return dir;
     } catch (e) {
-      console.warn('Error creating downloads directory:', e);
-      return getDownloadsDir();
+      console.warn('Error creating downloads directory, falling back to base:', e);
+      const base = FileSystem.documentDirectory || FileSystem.cacheDirectory || '';
+      return base.endsWith('/') ? base : `${base}/`;
     }
   };
 
@@ -640,6 +670,13 @@ export default function App() {
       return;
     }
 
+    // Proactively request storage / media permission
+    try {
+      await requestStoragePermission();
+    } catch (permErr) {
+      console.warn('Storage permission check failed:', permErr);
+    }
+
     const targetDir = await ensureDownloadsDirectory();
 
     // Defensively resolve relative URLs (e.g. /api/v/stream/...) to absolute HTTP/HTTPS
@@ -678,6 +715,10 @@ export default function App() {
       return updated;
     });
 
+    // Automatically open Downloads modal so user sees immediate progress
+    setIsDownloadsModalVisible(true);
+    setDownloadsTab('downloading');
+
     showToast(`Downloading: ${payload.title} (${payload.resolution || 'HD'})`, 'success');
 
     let lastBytes = 0;
@@ -687,7 +728,7 @@ export default function App() {
       const rawExpected = downloadProgress.totalBytesExpectedToWrite;
       const totalBytes = rawExpected > 0 ? rawExpected : expectedTotal;
       const writtenBytes = downloadProgress.totalBytesWritten;
-      const progress = totalBytes > 0 ? Math.min(1, writtenBytes / totalBytes) : 0;
+      const progress = totalBytes > 0 ? Math.min(1, writtenBytes / totalBytes) : (writtenBytes > 0 ? 0.05 : 0);
 
       const now = Date.now();
       const timeDiff = (now - lastTime) / 1000;
