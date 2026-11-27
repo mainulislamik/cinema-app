@@ -94,6 +94,7 @@ export default function App() {
   const isWebModalOpenRef = useRef(false);
   const downloadResumableRef = useRef(null);
   const activeTasksRef = useRef({});
+  const resumeDataRef = useRef({});
   const hasInitialLoadedRef = useRef(false);
   const lastBackPressRef = useRef(0);
 
@@ -732,21 +733,43 @@ export default function App() {
         delete activeTasksRef.current[id];
       }
 
-      const downloadResumable = FileSystem.createDownloadResumable(
-        downloadUrl,
-        fileUri,
-        {
+      const resumeData = payload.resumeData || resumeDataRef.current[id] || null;
+      let result = null;
+
+      try {
+        const downloadResumable = FileSystem.createDownloadResumable(
+          downloadUrl,
+          fileUri,
+          {
+            headers: {
+              'User-Agent': 'CinamaApp/1.0.5',
+              'Accept': '*/*',
+            },
+          },
+          callback,
+          resumeData
+        );
+        activeTasksRef.current[id] = downloadResumable;
+        result = await downloadResumable.downloadAsync();
+      } catch (resumableErr) {
+        console.warn('createDownloadResumable failed, trying fallback downloadAsync:', resumableErr);
+        result = await FileSystem.downloadAsync(downloadUrl, fileUri, {
           headers: {
             'User-Agent': 'CinamaApp/1.0.5',
             'Accept': '*/*',
           },
-        },
-        callback
-      );
-      activeTasksRef.current[id] = downloadResumable;
-
-      const result = await downloadResumable.downloadAsync();
+        });
+      }
       delete activeTasksRef.current[id];
+      delete resumeDataRef.current[id];
+
+      // Validate HTTP status
+      if (result && result.status && result.status >= 400) {
+        try {
+          await FileSystem.deleteAsync(fileUri, { idempotent: true });
+        } catch (delErr) {}
+        throw new Error(`Server returned HTTP ${result.status}`);
+      }
 
       if (result && result.uri) {
         let finalSize = 0;
@@ -775,6 +798,7 @@ export default function App() {
       }
     } catch (err) {
       delete activeTasksRef.current[id];
+      delete resumeDataRef.current[id];
       console.warn(`Download error for ${id}:`, err);
       setDownloads((prevList) => {
         const errList = prevList.map((item) =>
@@ -783,7 +807,7 @@ export default function App() {
         AsyncStorage.setItem(OFFLINE_DOWNLOADS_KEY, JSON.stringify(errList)).catch(() => {});
         return errList;
       });
-      showToast(`Download failed: ${payload.title}`, 'error');
+      showToast(`Download failed: ${err.message || payload.title}`, 'error');
     }
   }, [showToast, refreshStorageInfo]);
 
@@ -791,7 +815,10 @@ export default function App() {
     const task = activeTasksRef.current[id];
     if (task) {
       try {
-        await task.pauseAsync();
+        const pauseState = await task.pauseAsync();
+        if (pauseState && pauseState.resumeData) {
+          resumeDataRef.current[id] = pauseState.resumeData;
+        }
       } catch (e) {
         console.warn('Pause error:', e);
       }
@@ -821,7 +848,10 @@ export default function App() {
       }
     }
 
-    startOfflineDownload(item);
+    startOfflineDownload({
+      ...item,
+      resumeData: resumeDataRef.current[id] || null,
+    });
   }, [downloads, startOfflineDownload]);
 
   const cancelDownload = useCallback(async (id) => {
