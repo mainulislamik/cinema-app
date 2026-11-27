@@ -527,9 +527,9 @@ export default function App() {
     initServerUrl();
   }, [checkForUpdates]);
 
-  // Check for updates and notification permission whenever the app returns to the foreground
+  // Check for updates, notification permission, and handle app foreground/background lifecycle
   useEffect(() => {
-    const subscription = AppState.addEventListener('change', (nextAppState) => {
+    const subscription = AppState.addEventListener('change', async (nextAppState) => {
       if (nextAppState === 'active') {
         if (!isUpdatingRef.current) {
           checkForUpdates(false);
@@ -545,6 +545,24 @@ export default function App() {
               .catch(() => {});
           } else {
             sendNotificationStatusToWeb(true);
+          }
+        }
+      } else if (nextAppState === 'background' || nextAppState === 'inactive') {
+        // App minimized or user switched to another app:
+        // Safely capture partial byte offsets for all active downloads so switching apps never restarts from 0
+        const activeIds = Object.keys(activeTasksRef.current);
+        for (const taskId of activeIds) {
+          if (!userPausedIdsRef.current.has(taskId)) {
+            const task = activeTasksRef.current[taskId];
+            if (task) {
+              try {
+                task.pauseAsync().then((pauseRes) => {
+                  if (pauseRes && pauseRes.resumeData) {
+                    resumeDataRef.current[taskId] = pauseRes.resumeData;
+                  }
+                }).catch(() => {});
+              } catch (_) {}
+            }
           }
         }
       }
@@ -790,6 +808,27 @@ export default function App() {
 
     const fileUri = `${targetDir}${safeFn}`;
 
+    // Auto-detect existing partial file on disk to guarantee zero progress loss on app switch
+    let effectiveResumeData = payload.resumeData || resumeDataRef.current[id] || null;
+    let initialExistingBytes = payload.downloadedBytes || 0;
+    try {
+      const fileInfo = await FileSystem.getInfoAsync(fileUri);
+      if (fileInfo.exists && fileInfo.size > 0) {
+        if (!expectedTotal || fileInfo.size < expectedTotal) {
+          initialExistingBytes = Math.max(initialExistingBytes, fileInfo.size);
+          if (!effectiveResumeData) {
+            effectiveResumeData = String(fileInfo.size);
+          }
+          resumeDataRef.current[id] = effectiveResumeData;
+          console.log(`[CinemaVault] Disk check for ${id}: existing ${fileInfo.size} bytes. ResumeData=${effectiveResumeData}`);
+        }
+      }
+    } catch (_) {}
+
+    const initialProgress = (expectedTotal > 0 && initialExistingBytes > 0)
+      ? Math.min(1, initialExistingBytes / expectedTotal)
+      : (payload.progress || 0);
+
     const newItem = {
       id,
       title: payload.title || 'Untitled',
@@ -799,13 +838,13 @@ export default function App() {
       resolution: payload.resolution || 'HD',
       sizeText: payload.size || (expectedTotal > 0 ? `${(expectedTotal / (1024 * 1024)).toFixed(0)} MB` : 'HD'),
       fileUri,
-      progress: payload.progress || 0,
-      downloadedBytes: payload.downloadedBytes || 0,
+      progress: initialProgress,
+      downloadedBytes: initialExistingBytes,
       totalBytes: expectedTotal,
-      speedText: 'Starting...',
+      speedText: initialExistingBytes > 0 ? 'Resuming...' : 'Starting...',
       status: 'downloading',
       createdAt: payload.createdAt || Date.now(),
-      resumeData: payload.resumeData || null,
+      resumeData: effectiveResumeData,
     };
 
     // 1. Instant UI feedback: show modal & toast immediately
@@ -827,7 +866,7 @@ export default function App() {
     // 3. Storage permission check non-blocking in background
     requestStoragePermission().catch(() => {});
 
-    let lastBytes = 0;
+    let lastBytes = initialExistingBytes;
     let lastTime = Date.now();
 
     const callback = (downloadProgress) => {
@@ -835,6 +874,11 @@ export default function App() {
       const totalBytes = rawExpected > 0 ? rawExpected : expectedTotal;
       const writtenBytes = downloadProgress.totalBytesWritten;
       const progress = totalBytes > 0 ? Math.min(1, writtenBytes / totalBytes) : (writtenBytes > 0 ? 0.05 : 0);
+
+      // Continuously record latest byte position so app minimization or switching never resets to 0
+      if (writtenBytes > 0) {
+        resumeDataRef.current[id] = String(writtenBytes);
+      }
 
       const now = Date.now();
       const timeDiff = (now - lastTime) / 1000;
@@ -865,6 +909,7 @@ export default function App() {
                 downloadedBytes: writtenBytes,
                 totalBytes,
                 speedText: speedStr,
+                resumeData: String(writtenBytes),
               };
             }
             return item;
@@ -881,51 +926,22 @@ export default function App() {
         delete activeTasksRef.current[id];
       }
 
-      const resumeData = payload.resumeData || resumeDataRef.current[id] || null;
       let result = null;
-
-      try {
-        const downloadResumable = FileSystem.createDownloadResumable(
-          downloadUrl,
-          fileUri,
-          {
-            headers: {
-              'User-Agent': 'CinamaApp/1.0.5',
-              'Accept': '*/*',
-            },
+      const downloadResumable = FileSystem.createDownloadResumable(
+        downloadUrl,
+        fileUri,
+        {
+          headers: {
+            'User-Agent': 'CinamaApp/1.0.5',
+            'Accept': '*/*',
           },
-          callback,
-          resumeData
-        );
-        activeTasksRef.current[id] = downloadResumable;
-        result = await downloadResumable.downloadAsync();
-      } catch (resumableErr) {
-        console.warn('createDownloadResumable with resumeData failed, attempting fresh resumption:', resumableErr);
-        try {
-          const freshResumable = FileSystem.createDownloadResumable(
-            downloadUrl,
-            fileUri,
-            {
-              headers: {
-                'User-Agent': 'CinamaApp/1.0.5',
-                'Accept': '*/*',
-              },
-            },
-            callback,
-            null
-          );
-          activeTasksRef.current[id] = freshResumable;
-          result = await freshResumable.downloadAsync();
-        } catch (freshErr) {
-          console.warn('fresh createDownloadResumable failed, trying fallback downloadAsync:', freshErr);
-          result = await FileSystem.downloadAsync(downloadUrl, fileUri, {
-            headers: {
-              'User-Agent': 'CinamaApp/1.0.5',
-              'Accept': '*/*',
-            },
-          });
-        }
-      }
+        },
+        callback,
+        effectiveResumeData
+      );
+      activeTasksRef.current[id] = downloadResumable;
+      result = await downloadResumable.downloadAsync();
+
       delete activeTasksRef.current[id];
       delete resumeDataRef.current[id];
 
@@ -975,8 +991,9 @@ export default function App() {
       let partialBytes = 0;
       try {
         const fileInfo = await FileSystem.getInfoAsync(fileUri);
-        if (fileInfo.exists && fileInfo.size) {
+        if (fileInfo.exists && fileInfo.size > 0) {
           partialBytes = fileInfo.size;
+          resumeDataRef.current[id] = String(fileInfo.size);
         }
       } catch (_) {}
 
@@ -993,6 +1010,7 @@ export default function App() {
               downloadedBytes: currentBytes,
               progress,
               speedText: 'Auto-resuming in background...',
+              resumeData: resumeDataRef.current[id] || (currentBytes > 0 ? String(currentBytes) : null),
             };
           }
           return item;
@@ -1088,10 +1106,21 @@ export default function App() {
       return updated;
     });
 
+    let effectiveResume = item.resumeData || resumeDataRef.current[id] || null;
+    if (!effectiveResume && item.fileUri) {
+      try {
+        const fileInfo = await FileSystem.getInfoAsync(item.fileUri);
+        if (fileInfo.exists && fileInfo.size > 0) {
+          effectiveResume = String(fileInfo.size);
+          resumeDataRef.current[id] = effectiveResume;
+        }
+      } catch (_) {}
+    }
+
     startOfflineDownload({
       ...item,
       url: resolvedUrl,
-      resumeData: item.resumeData || resumeDataRef.current[id] || null,
+      resumeData: effectiveResume,
     });
   }, [startOfflineDownload, resolveAbsoluteDownloadUrl, downloads]);
 
