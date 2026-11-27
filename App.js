@@ -88,6 +88,11 @@ export default function App() {
   const [downloadsTab, setDownloadsTab] = useState('completed'); // 'completed' | 'downloading'
   const [storageInfo, setStorageInfo] = useState({ usedMB: '0.0', freeGB: '0.0' });
   const [toastInfo, setToastInfo] = useState(null);
+  const [offlinePlayingItem, setOfflinePlayingItem] = useState(null);
+  const offlinePlayingItemRef = useRef(null);
+  useEffect(() => {
+    offlinePlayingItemRef.current = offlinePlayingItem;
+  }, [offlinePlayingItem]);
 
   const downloadsRef = useRef([]);
   useEffect(() => {
@@ -507,6 +512,10 @@ export default function App() {
   // Hardware back button support with double-tap exit
   useEffect(() => {
     const onBackPress = () => {
+      if (offlinePlayingItemRef.current) {
+        setOfflinePlayingItem(null);
+        return true;
+      }
       if (isUpdatingRef.current) {
         // Dismiss updating overlay on back press if completed or error
         setIsUpdating(false);
@@ -718,6 +727,7 @@ export default function App() {
       speedText: 'Starting...',
       status: 'downloading',
       createdAt: payload.createdAt || Date.now(),
+      resumeData: payload.resumeData || null,
     };
 
     // 1. Instant UI feedback: show modal & toast immediately
@@ -811,13 +821,34 @@ export default function App() {
         activeTasksRef.current[id] = downloadResumable;
         result = await downloadResumable.downloadAsync();
       } catch (resumableErr) {
-        console.warn('createDownloadResumable failed, trying fallback downloadAsync:', resumableErr);
-        result = await FileSystem.downloadAsync(downloadUrl, fileUri, {
-          headers: {
-            'User-Agent': 'CinamaApp/1.0.5',
-            'Accept': '*/*',
-          },
-        });
+        console.warn('createDownloadResumable with resumeData failed, restarting cleanly:', resumableErr);
+        try {
+          await FileSystem.deleteAsync(fileUri, { idempotent: true });
+        } catch (_) {}
+        try {
+          const freshResumable = FileSystem.createDownloadResumable(
+            downloadUrl,
+            fileUri,
+            {
+              headers: {
+                'User-Agent': 'CinamaApp/1.0.5',
+                'Accept': '*/*',
+              },
+            },
+            callback,
+            null
+          );
+          activeTasksRef.current[id] = freshResumable;
+          result = await freshResumable.downloadAsync();
+        } catch (freshErr) {
+          console.warn('fresh createDownloadResumable failed, trying fallback downloadAsync:', freshErr);
+          result = await FileSystem.downloadAsync(downloadUrl, fileUri, {
+            headers: {
+              'User-Agent': 'CinamaApp/1.0.5',
+              'Accept': '*/*',
+            },
+          });
+        }
       }
       delete activeTasksRef.current[id];
       delete resumeDataRef.current[id];
@@ -871,11 +902,13 @@ export default function App() {
   }, [showToast, refreshStorageInfo]);
 
   const pauseDownload = useCallback(async (id) => {
+    let savedResumeData = null;
     const task = activeTasksRef.current[id];
     if (task) {
       try {
         const pauseState = await task.pauseAsync();
         if (pauseState && pauseState.resumeData) {
+          savedResumeData = pauseState.resumeData;
           resumeDataRef.current[id] = pauseState.resumeData;
         }
       } catch (e) {
@@ -884,7 +917,16 @@ export default function App() {
       delete activeTasksRef.current[id];
     }
     setDownloads((prev) => {
-      const updated = prev.map((d) => (d.id === id ? { ...d, status: 'paused', speedText: 'Paused' } : d));
+      const updated = prev.map((d) =>
+        d.id === id
+          ? {
+              ...d,
+              status: 'paused',
+              speedText: 'Paused',
+              resumeData: savedResumeData || d.resumeData || null,
+            }
+          : d
+      );
       AsyncStorage.setItem(OFFLINE_DOWNLOADS_KEY, JSON.stringify(updated)).catch(() => {});
       return updated;
     });
@@ -907,7 +949,7 @@ export default function App() {
 
     startOfflineDownload({
       ...item,
-      resumeData: resumeDataRef.current[id] || null,
+      resumeData: item.resumeData || resumeDataRef.current[id] || null,
     });
   }, [downloads, startOfflineDownload]);
 
@@ -967,17 +1009,9 @@ export default function App() {
     );
   }, [downloads, showToast, refreshStorageInfo]);
 
-  const playOfflineVideo = useCallback(async (item) => {
-    if (!item || !item.fileUri) {
-      Alert.alert('Error', 'Video file path is invalid.');
-      return;
-    }
+  const launchExternalPlayer = useCallback(async (item) => {
+    if (!item || !item.fileUri) return;
     try {
-      const fileInfo = await FileSystem.getInfoAsync(item.fileUri);
-      if (!fileInfo.exists) {
-        Alert.alert('File Not Found', 'This video file was removed or moved.');
-        return;
-      }
       const contentUri = await FileSystem.getContentUriAsync(item.fileUri);
       await IntentLauncher.startActivityAsync('android.intent.action.VIEW', {
         data: contentUri,
@@ -992,6 +1026,25 @@ export default function App() {
       );
     }
   }, []);
+
+  const playOfflineVideo = useCallback(async (item) => {
+    if (!item || !item.fileUri) {
+      Alert.alert('Error', 'Video file path is invalid.');
+      return;
+    }
+    try {
+      const fileInfo = await FileSystem.getInfoAsync(item.fileUri);
+      if (!fileInfo.exists) {
+        Alert.alert('File Not Found', 'This video file was removed or moved.');
+        return;
+      }
+      // Authentic MovieBox-style: Open In-App Offline Video Player Modal
+      setOfflinePlayingItem(item);
+    } catch (err) {
+      console.warn('Offline player error:', err);
+      launchExternalPlayer(item);
+    }
+  }, [launchExternalPlayer]);
 
   const handleWebViewError = (syntheticEvent) => {
     console.warn('WebView error occurred:', syntheticEvent.nativeEvent);
@@ -1587,6 +1640,108 @@ export default function App() {
               />
             )
           )}
+        </SafeAreaView>
+      </Modal>
+
+      {/* Authentic In-App Offline Video Player Modal (MovieBox Style) */}
+      <Modal
+        visible={!!offlinePlayingItem}
+        animationType="fade"
+        supportedOrientations={['portrait', 'landscape']}
+        onRequestClose={() => setOfflinePlayingItem(null)}
+      >
+        <SafeAreaView style={styles.offlinePlayerScreen}>
+          <StatusBar hidden={false} barStyle="light-content" backgroundColor="#000000" />
+          <View style={styles.offlinePlayerTopBar}>
+            <TouchableOpacity
+              onPress={() => setOfflinePlayingItem(null)}
+              style={styles.offlinePlayerCloseBtn}
+              activeOpacity={0.7}
+            >
+              <Feather name="arrow-left" size={22} color="#ffffff" />
+            </TouchableOpacity>
+
+            <View style={styles.offlinePlayerTitleWrap}>
+              <Text style={styles.offlinePlayerTitleText} numberOfLines={1}>
+                {offlinePlayingItem?.title || 'Offline Video'}
+              </Text>
+              {offlinePlayingItem?.resolution ? (
+                <View style={styles.offlinePlayerQualityBadge}>
+                  <Text style={styles.offlinePlayerQualityText}>
+                    {offlinePlayingItem.resolution} • OFFLINE
+                  </Text>
+                </View>
+              ) : null}
+            </View>
+
+            <TouchableOpacity
+              onPress={() => launchExternalPlayer(offlinePlayingItem)}
+              style={styles.offlinePlayerExternalBtn}
+              activeOpacity={0.7}
+            >
+              <Feather name="external-link" size={15} color="#38bdf8" style={{ marginRight: 4 }} />
+              <Text style={styles.offlinePlayerExternalText}>External</Text>
+            </TouchableOpacity>
+          </View>
+
+          <View style={styles.offlinePlayerBody}>
+            {offlinePlayingItem?.fileUri ? (
+              <WebView
+                source={{
+                  html: `<!DOCTYPE html>
+<html>
+<head>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body {
+      width: 100%;
+      height: 100%;
+      background-color: #000000;
+      overflow: hidden;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    }
+    video {
+      width: 100vw;
+      height: 100vh;
+      max-height: 100vh;
+      max-width: 100vw;
+      object-fit: contain;
+      background: #000000;
+    }
+  </style>
+</head>
+<body>
+  <video
+    src="${offlinePlayingItem.fileUri}"
+    controls
+    autoplay
+    playsinline
+    webkit-playsinline
+    controlsList="nodownload"
+  ></video>
+</body>
+</html>`,
+                }}
+                originWhitelist={['*']}
+                allowFileAccess={true}
+                allowFileAccessFromFileURLs={true}
+                allowUniversalAccessFromFileURLs={true}
+                allowsInlineMediaPlayback={true}
+                mediaPlaybackRequiresUserAction={false}
+                javaScriptEnabled={true}
+                domStorageEnabled={true}
+                style={{ flex: 1, backgroundColor: '#000000' }}
+              />
+            ) : (
+              <View style={styles.emptyContainer}>
+                <Text style={styles.emptySubtitle}>Unable to load offline video file.</Text>
+              </View>
+            )}
+          </View>
         </SafeAreaView>
       </Modal>
 
@@ -2329,5 +2484,63 @@ const styles = StyleSheet.create({
     color: '#64748b',
     fontSize: 11,
     lineHeight: 15,
+  },
+  offlinePlayerScreen: {
+    flex: 1,
+    backgroundColor: '#000000',
+  },
+  offlinePlayerTopBar: {
+    height: 52,
+    backgroundColor: '#0a0e17',
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: '#1e293b',
+  },
+  offlinePlayerCloseBtn: {
+    padding: 8,
+    marginRight: 6,
+  },
+  offlinePlayerTitleWrap: {
+    flex: 1,
+    marginRight: 8,
+  },
+  offlinePlayerTitleText: {
+    color: '#ffffff',
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  offlinePlayerQualityBadge: {
+    alignSelf: 'flex-start',
+    backgroundColor: '#38bdf820',
+    paddingHorizontal: 6,
+    paddingVertical: 1,
+    borderRadius: 4,
+    marginTop: 2,
+  },
+  offlinePlayerQualityText: {
+    color: '#38bdf8',
+    fontSize: 9,
+    fontWeight: '700',
+  },
+  offlinePlayerExternalBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#1e293b',
+    paddingVertical: 6,
+    paddingHorizontal: 10,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: '#38bdf840',
+  },
+  offlinePlayerExternalText: {
+    color: '#38bdf8',
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  offlinePlayerBody: {
+    flex: 1,
+    backgroundColor: '#000000',
   },
 });
