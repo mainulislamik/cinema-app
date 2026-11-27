@@ -678,6 +678,20 @@ export default function App() {
     initDownloads();
   }, [refreshStorageInfo]);
 
+  // Defensively resolve relative URLs to full absolute HTTP/HTTPS URL with optional filename
+  const resolveAbsoluteDownloadUrl = useCallback((rawUrl, filename = '') => {
+    if (!rawUrl || typeof rawUrl !== 'string') return '';
+    let target = rawUrl.trim();
+    if (target.startsWith('/') || !target.startsWith('http')) {
+      const base = DEFAULT_SERVER_URL.replace(/\/+$/, '');
+      target = `${base}${target.startsWith('/') ? '' : '/'}${target.replace(/^\/+/, '')}`;
+    }
+    if (filename && !target.includes('download=1')) {
+      target += `${target.includes('?') ? '&' : '?'}download=1&filename=${encodeURIComponent(filename)}`;
+    }
+    return target;
+  }, []);
+
   // Start offline download with resumable progress tracking
   const startOfflineDownload = useCallback(async (payload) => {
     if (!payload || !payload.url) {
@@ -686,19 +700,14 @@ export default function App() {
     }
 
     const id = payload.id || `dl_${Date.now()}`;
-    const safeTitle = (payload.title || 'media').replace(/[^a-zA-Z0-9_\-\.]/g, '_').substring(0, 40);
-
-    // Defensively resolve relative URLs (e.g. /api/v/stream/...) to absolute HTTP/HTTPS
-    let downloadUrl = payload.url;
-    if (typeof downloadUrl === 'string' && (downloadUrl.startsWith('/') || !downloadUrl.startsWith('http'))) {
-      const base = DEFAULT_SERVER_URL.replace(/\/+$/, '');
-      downloadUrl = `${base}${downloadUrl.startsWith('/') ? '' : '/'}${downloadUrl.replace(/^\/+/, '')}`;
-    }
+    const safeTitle = (payload.title || 'media')
+      .replace(/[^a-zA-Z0-9_\-]/g, '_')
+      .replace(/_+/g, '_')
+      .replace(/^_+|_+$/g, '')
+      .substring(0, 40) || 'media';
 
     const safeFn = `${safeTitle}_${payload.resolution || 'HD'}.mp4`;
-    if (!downloadUrl.includes('download=1')) {
-      downloadUrl += `${downloadUrl.includes('?') ? '&' : '?'}download=1&filename=${encodeURIComponent(safeFn)}`;
-    }
+    const downloadUrl = resolveAbsoluteDownloadUrl(payload.url, safeFn);
 
     const expectedTotal = Number(payload.totalBytes || payload.size_bytes) || 0;
 
@@ -1237,11 +1246,13 @@ export default function App() {
               const urlParts = url.split('?');
               const qs = urlParts[1] || '';
               const matchFn = qs.match(/filename=([^&]+)/);
-              const fn = matchFn ? decodeURIComponent(matchFn[1]) : 'Movie Media.mp4';
+              const rawFn = matchFn ? decodeURIComponent(matchFn[1]) : 'Movie_Media.mp4';
+              const cleanFn = rawFn.replace(/[^a-zA-Z0-9_\-\.]/g, '_').replace(/_+/g, '_');
+              const absUrl = resolveAbsoluteDownloadUrl(url, cleanFn);
               setDownloadPromptPayload({
-                url,
-                filename: fn,
-                title: fn.replace(/\.(mp4|mkv|avi|mov|webm)$/i, ''),
+                url: absUrl,
+                filename: cleanFn,
+                title: cleanFn.replace(/\.(mp4|mkv|avi|mov|webm)$/i, '').replace(/_+/g, ' ').trim(),
                 resolution: 'HD',
               });
               return false;
@@ -1786,8 +1797,13 @@ export default function App() {
                   const p = downloadPromptPayload;
                   setDownloadPromptPayload(null);
                   if (p && p.url) {
-                    Linking.openURL(p.url).catch(() => {});
-                    showToast('Starting system download to phone storage...', 'success');
+                    const safeFn = (p.filename || `${p.title || 'media'}_${p.resolution || 'HD'}.mp4`).replace(/[^a-zA-Z0-9_\-\.]/g, '_');
+                    const targetUrl = resolveAbsoluteDownloadUrl(p.url, safeFn);
+                    showToast('Opening downloader / browser...', 'success');
+                    Linking.openURL(targetUrl).catch((err) => {
+                      console.warn('Linking error:', err);
+                      showToast('Could not open external downloader', 'error');
+                    });
                   }
                 }}
                 activeOpacity={0.8}
@@ -1811,7 +1827,9 @@ export default function App() {
                   const p = downloadPromptPayload;
                   setDownloadPromptPayload(null);
                   if (p) {
-                    startOfflineDownload(p);
+                    const safeFn = (p.filename || `${p.title || 'media'}_${p.resolution || 'HD'}.mp4`).replace(/[^a-zA-Z0-9_\-\.]/g, '_');
+                    const targetUrl = resolveAbsoluteDownloadUrl(p.url, safeFn);
+                    startOfflineDownload({ ...p, url: targetUrl, filename: safeFn });
                   }
                 }}
                 activeOpacity={0.8}
@@ -1835,8 +1853,13 @@ export default function App() {
                   const p = downloadPromptPayload;
                   setDownloadPromptPayload(null);
                   if (p && p.url) {
-                    showToast('Opening in browser...', 'info');
-                    Linking.openURL(p.url).catch(() => {});
+                    const safeFn = (p.filename || `${p.title || 'media'}_${p.resolution || 'HD'}.mp4`).replace(/[^a-zA-Z0-9_\-\.]/g, '_');
+                    const targetUrl = resolveAbsoluteDownloadUrl(p.url, safeFn);
+                    showToast('Opening stream in browser...', 'info');
+                    Linking.openURL(targetUrl).catch((err) => {
+                      console.warn('Linking error:', err);
+                      showToast('Could not open external browser', 'error');
+                    });
                   }
                 }}
                 activeOpacity={0.8}
