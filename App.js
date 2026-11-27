@@ -29,6 +29,7 @@ import * as ScreenOrientation from 'expo-screen-orientation';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as IntentLauncher from 'expo-intent-launcher';
 import * as Updates from 'expo-updates';
+import { getOfflinePlayerHtml } from './offlinePlayerHtml';
 
 const { width } = Dimensions.get('window');
 
@@ -125,6 +126,7 @@ export default function App() {
   const [toastInfo, setToastInfo] = useState(null);
   const [offlinePlayingItem, setOfflinePlayingItem] = useState(null);
   const offlinePlayingItemRef = useRef(null);
+  const closeOfflinePlayerRef = useRef(null);
   useEffect(() => {
     offlinePlayingItemRef.current = offlinePlayingItem;
   }, [offlinePlayingItem]);
@@ -548,23 +550,8 @@ export default function App() {
           }
         }
       } else if (nextAppState === 'background' || nextAppState === 'inactive') {
-        // App minimized or user switched to another app:
-        // Safely capture partial byte offsets for all active downloads so switching apps never restarts from 0
-        const activeIds = Object.keys(activeTasksRef.current);
-        for (const taskId of activeIds) {
-          if (!userPausedIdsRef.current.has(taskId)) {
-            const task = activeTasksRef.current[taskId];
-            if (task) {
-              try {
-                task.pauseAsync().then((pauseRes) => {
-                  if (pauseRes && pauseRes.resumeData) {
-                    resumeDataRef.current[taskId] = pauseRes.resumeData;
-                  }
-                }).catch(() => {});
-              } catch (_) {}
-            }
-          }
-        }
+        // App minimized or screen locked: Keep active downloads running uninterrupted in the background.
+        // User explicitly controls downloads via in-app Pause/Resume buttons.
       }
     });
     return () => subscription.remove();
@@ -574,7 +561,12 @@ export default function App() {
   useEffect(() => {
     const onBackPress = () => {
       if (offlinePlayingItemRef.current) {
-        setOfflinePlayingItem(null);
+        if (closeOfflinePlayerRef.current) {
+          closeOfflinePlayerRef.current();
+        } else {
+          setOfflinePlayingItem(null);
+          ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP).catch(() => {});
+        }
         return true;
       }
       if (isUpdatingRef.current) {
@@ -796,7 +788,17 @@ export default function App() {
     const safeFn = `${safeTitle}_${payload.resolution || 'HD'}.mbx`;
     const downloadUrl = resolveAbsoluteDownloadUrl(payload.url, `${safeTitle}_${payload.resolution || 'HD'}.mp4`);
 
-    const expectedTotal = Number(payload.totalBytes || payload.size_bytes) || 0;
+    let expectedTotal = Number(payload.totalBytes || payload.size_bytes) || 0;
+    if (expectedTotal <= 0 && payload.size) {
+      const match = String(payload.size).match(/([\d\.]+)\s*(GB|MB|KB)/i);
+      if (match) {
+        const val = parseFloat(match[1]);
+        const unit = match[2].toUpperCase();
+        if (unit === 'GB') expectedTotal = Math.round(val * 1024 * 1024 * 1024);
+        else if (unit === 'MB') expectedTotal = Math.round(val * 1024 * 1024);
+        else if (unit === 'KB') expectedTotal = Math.round(val * 1024);
+      }
+    }
 
     let targetDir = '';
     try {
@@ -1099,7 +1101,7 @@ export default function App() {
     setDownloads((prev) => {
       const updated = prev.map((d) =>
         d.id === id
-          ? { ...d, status: 'downloading', speedText: 'Connecting...', url: resolvedUrl }
+          ? { ...d, status: 'downloading', speedText: (d.downloadedBytes > 0 ? 'Resuming...' : 'Connecting...'), url: resolvedUrl }
           : d
       );
       AsyncStorage.setItem(OFFLINE_DOWNLOADS_KEY, JSON.stringify(updated)).catch(() => {});
@@ -1249,6 +1251,46 @@ export default function App() {
     }
   }, []);
 
+  const closeOfflinePlayer = useCallback(async () => {
+    setOfflinePlayingItem(null);
+    try {
+      await ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP);
+    } catch (_) {}
+  }, []);
+
+  useEffect(() => {
+    closeOfflinePlayerRef.current = closeOfflinePlayer;
+  }, [closeOfflinePlayer]);
+
+  const toggleOfflineOrientation = useCallback(async () => {
+    try {
+      const current = await ScreenOrientation.getOrientationAsync();
+      const isLandscape =
+        current === ScreenOrientation.Orientation.LANDSCAPE_LEFT ||
+        current === ScreenOrientation.Orientation.LANDSCAPE_RIGHT;
+      if (isLandscape) {
+        await ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP);
+      } else {
+        await ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.LANDSCAPE);
+      }
+    } catch (_) {}
+  }, []);
+
+  const handleOfflinePlayerMessage = useCallback((event) => {
+    try {
+      const data = event.nativeEvent.data;
+      if (!data) return;
+      const msg = typeof data === 'string' ? JSON.parse(data) : data;
+      if (msg && msg.type === 'CLOSE_PLAYER') {
+        closeOfflinePlayer();
+      } else if (msg && msg.type === 'TOGGLE_ORIENTATION') {
+        toggleOfflineOrientation();
+      }
+    } catch (err) {
+      console.warn('Offline player message error:', err);
+    }
+  }, [closeOfflinePlayer, toggleOfflineOrientation]);
+
   const playOfflineVideo = useCallback(async (item) => {
     if (!item || !item.fileUri) {
       Alert.alert('Error', 'Video file path is invalid.');
@@ -1260,7 +1302,10 @@ export default function App() {
         Alert.alert('File Not Found', 'This video file was removed or moved.');
         return;
       }
-      // Authentic MovieBox-style: Open In-App Offline Video Player Modal
+      // Authentic MovieBox Cinema Fullscreen: lock to landscape for wide immersive playback
+      try {
+        await ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.LANDSCAPE);
+      } catch (_) {}
       setOfflinePlayingItem(item);
     } catch (err) {
       console.warn('Offline player error:', err);
@@ -1902,103 +1947,38 @@ export default function App() {
         </SafeAreaView>
       </Modal>
 
-      {/* Authentic In-App Offline Video Player Modal (MovieBox Style) */}
+      {/* Authentic In-App Offline Video Player Modal (MovieBox Style - Full Landscape Cinema Mode) */}
       <Modal
         visible={!!offlinePlayingItem}
         animationType="fade"
-        supportedOrientations={['portrait', 'landscape']}
-        onRequestClose={() => setOfflinePlayingItem(null)}
+        supportedOrientations={['landscape', 'landscape-left', 'landscape-right', 'portrait']}
+        onRequestClose={closeOfflinePlayer}
+        statusBarTranslucent={true}
       >
-        <SafeAreaView style={styles.offlinePlayerScreen}>
-          <StatusBar hidden={false} barStyle="light-content" backgroundColor="#000000" />
-          <View style={styles.offlinePlayerTopBar}>
-            <TouchableOpacity
-              onPress={() => setOfflinePlayingItem(null)}
-              style={styles.offlinePlayerCloseBtn}
-              activeOpacity={0.7}
-            >
-              <Feather name="arrow-left" size={22} color="#ffffff" />
-            </TouchableOpacity>
-
-            <View style={styles.offlinePlayerTitleWrap}>
-              <Text style={styles.offlinePlayerTitleText} numberOfLines={1}>
-                {offlinePlayingItem?.title || 'Offline Video'}
-              </Text>
-              {offlinePlayingItem?.resolution ? (
-                <View style={styles.offlinePlayerQualityBadge}>
-                  <Text style={styles.offlinePlayerQualityText}>
-                    {offlinePlayingItem.resolution} • OFFLINE
-                  </Text>
-                </View>
-              ) : null}
+        <View style={styles.offlinePlayerScreen}>
+          <StatusBar hidden={true} />
+          {offlinePlayingItem?.fileUri ? (
+            <WebView
+              source={{
+                html: getOfflinePlayerHtml(offlinePlayingItem),
+              }}
+              originWhitelist={['*']}
+              allowFileAccess={true}
+              allowFileAccessFromFileURLs={true}
+              allowUniversalAccessFromFileURLs={true}
+              allowsInlineMediaPlayback={true}
+              mediaPlaybackRequiresUserAction={false}
+              javaScriptEnabled={true}
+              domStorageEnabled={true}
+              onMessage={handleOfflinePlayerMessage}
+              style={{ flex: 1, backgroundColor: '#000000' }}
+            />
+          ) : (
+            <View style={styles.emptyContainer}>
+              <Text style={styles.emptySubtitle}>Unable to load offline video file.</Text>
             </View>
-
-            <View style={styles.offlinePlayerShieldBadge}>
-              <Feather name="shield" size={13} color="#10b981" style={{ marginRight: 4 }} />
-              <Text style={styles.offlinePlayerShieldText}>Vault Protected</Text>
-            </View>
-          </View>
-
-          <View style={styles.offlinePlayerBody}>
-            {offlinePlayingItem?.fileUri ? (
-              <WebView
-                source={{
-                  html: `<!DOCTYPE html>
-<html>
-<head>
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <style>
-    * { margin: 0; padding: 0; box-sizing: border-box; }
-    html, body {
-      width: 100%;
-      height: 100%;
-      background-color: #000000;
-      overflow: hidden;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-    }
-    video {
-      width: 100vw;
-      height: 100vh;
-      max-height: 100vh;
-      max-width: 100vw;
-      object-fit: contain;
-      background: #000000;
-    }
-  </style>
-</head>
-<body>
-  <video
-    controls
-    autoplay
-    playsinline
-    webkit-playsinline
-    controlsList="nodownload"
-  >
-    <source src="${offlinePlayingItem.fileUri}" type="video/mp4" />
-  </video>
-</body>
-</html>`,
-                }}
-                originWhitelist={['*']}
-                allowFileAccess={true}
-                allowFileAccessFromFileURLs={true}
-                allowUniversalAccessFromFileURLs={true}
-                allowsInlineMediaPlayback={true}
-                mediaPlaybackRequiresUserAction={false}
-                javaScriptEnabled={true}
-                domStorageEnabled={true}
-                style={{ flex: 1, backgroundColor: '#000000' }}
-              />
-            ) : (
-              <View style={styles.emptyContainer}>
-                <Text style={styles.emptySubtitle}>Unable to load offline video file.</Text>
-              </View>
-            )}
-          </View>
-        </SafeAreaView>
+          )}
+        </View>
       </Modal>
 
       {/* Universal Download Options Action Sheet */}
@@ -2821,7 +2801,6 @@ const styles = StyleSheet.create({
   offlinePlayerScreen: {
     flex: 1,
     backgroundColor: '#000000',
-    paddingTop: Platform.OS === 'android' ? (StatusBar.currentHeight || 28) : 0,
   },
   offlinePlayerTopBar: {
     height: 52,
