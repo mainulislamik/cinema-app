@@ -83,10 +83,16 @@ export default function App() {
 
   // MovieBox-style Offline Downloader & Playback
   const [downloads, setDownloads] = useState([]);
+  const [downloadPromptPayload, setDownloadPromptPayload] = useState(null);
   const [isDownloadsModalVisible, setIsDownloadsModalVisible] = useState(false);
   const [downloadsTab, setDownloadsTab] = useState('completed'); // 'completed' | 'downloading'
   const [storageInfo, setStorageInfo] = useState({ usedMB: '0.0', freeGB: '0.0' });
   const [toastInfo, setToastInfo] = useState(null);
+
+  const downloadsRef = useRef([]);
+  useEffect(() => {
+    downloadsRef.current = downloads;
+  }, [downloads]);
 
   const webViewRef = useRef(null);
   const canGoBackRef = useRef(false);
@@ -680,12 +686,22 @@ export default function App() {
       downloadUrl = `${base}${downloadUrl.startsWith('/') ? '' : '/'}${downloadUrl.replace(/^\/+/, '')}`;
     }
 
+    const safeFn = `${safeTitle}_${payload.resolution || 'HD'}.mp4`;
+    if (!downloadUrl.includes('download=1')) {
+      downloadUrl += `${downloadUrl.includes('?') ? '&' : '?'}download=1&filename=${encodeURIComponent(safeFn)}`;
+    }
+
     const expectedTotal = Number(payload.totalBytes || payload.size_bytes) || 0;
 
-    const baseDir = FileSystem.documentDirectory || FileSystem.cacheDirectory || '';
-    const cleanBase = baseDir.endsWith('/') ? baseDir : `${baseDir}/`;
-    const targetDir = `${cleanBase}downloads/`;
-    const fileUri = payload.fileUri || `${targetDir}${safeTitle}_${payload.resolution || 'HD'}_${Date.now()}.mp4`;
+    let targetDir = '';
+    try {
+      targetDir = await ensureDownloadsDirectory();
+    } catch (_) {
+      const base = FileSystem.documentDirectory || FileSystem.cacheDirectory || '';
+      targetDir = base.endsWith('/') ? base : `${base}/`;
+    }
+
+    const fileUri = payload.fileUri || `${targetDir}${safeFn}`;
 
     const newItem = {
       id,
@@ -875,20 +891,18 @@ export default function App() {
   }, []);
 
   const resumeDownload = useCallback(async (id) => {
-    const item = downloads.find((d) => d.id === id);
+    let item = downloadsRef.current.find((d) => d.id === id);
+    if (!item) {
+      item = downloads.find((d) => d.id === id);
+    }
     if (!item) return;
 
     const existingTask = activeTasksRef.current[id];
     if (existingTask) {
       try {
-        await existingTask.resumeAsync();
-        setDownloads((prev) =>
-          prev.map((d) => (d.id === id ? { ...d, status: 'downloading', speedText: 'Resuming...' } : d))
-        );
-        return;
-      } catch (e) {
-        console.warn('Direct resume failed, restarting with same file:', e);
-      }
+        await existingTask.pauseAsync();
+      } catch (e) {}
+      delete activeTasksRef.current[id];
     }
 
     startOfflineDownload({
@@ -1014,8 +1028,8 @@ export default function App() {
         }
       } else if (msg && msg.type === 'MODAL_STATE') {
         isWebModalOpenRef.current = !!msg.isOpen;
-      } else if (msg && msg.type === 'START_OFFLINE_DOWNLOAD') {
-        startOfflineDownload(msg.payload);
+      } else if (msg && (msg.type === 'START_OFFLINE_DOWNLOAD' || msg.type === 'DOWNLOAD_REQUEST')) {
+        setDownloadPromptPayload(msg.payload);
       } else if (msg && msg.type === 'OPEN_DOWNLOADS') {
         setIsDownloadsModalVisible(true);
         setDownloadsTab('completed');
@@ -1108,29 +1122,28 @@ export default function App() {
                 style.appendChild(document.createTextNode(hideCss));
                 (document.head || document.documentElement).appendChild(style);
 
-                // Global capture-phase download interceptor: NEVER let clicks redirect to browser
+                // Clean download interceptor in bubble phase
                 document.addEventListener('click', function(e) {
-                  var target = e.target && e.target.closest ? e.target.closest('a, button') : null;
+                  var target = e.target && e.target.closest ? e.target.closest('a[download], a[href*="/api/v/stream/"], a[href*="download=1"]') : null;
                   if (!target) return;
-                  var href = target.getAttribute('href') || '';
+                  var href = target.href || target.getAttribute('href') || '';
+                  if (!href) return;
+                  e.preventDefault();
+                  e.stopPropagation();
                   var btnText = (target.innerText || target.textContent || '').trim();
-                  var isDlButton = btnText.toLowerCase().includes('download') && !btnText.toLowerCase().includes('app');
-                  var isDownload = target.hasAttribute('download') || href.includes('/downloads/') || href.includes('/api/v/stream/') || /\.(mp4|mkv|avi|mov|webm)(\?.*)?$/i.test(href);
-                  if (isDownload) {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    if (window.ReactNativeWebView && window.ReactNativeWebView.postMessage) {
-                      window.ReactNativeWebView.postMessage(JSON.stringify({
-                        type: 'START_OFFLINE_DOWNLOAD',
-                        payload: {
-                          url: target.href || href,
-                          title: target.getAttribute('download') || btnText || 'Movie Media',
-                          resolution: 'HD'
-                        }
-                      }));
-                    }
+                  var fn = target.getAttribute('download') || 'Movie Media.mp4';
+                  if (window.ReactNativeWebView && window.ReactNativeWebView.postMessage) {
+                    window.ReactNativeWebView.postMessage(JSON.stringify({
+                      type: 'DOWNLOAD_REQUEST',
+                      payload: {
+                        url: href,
+                        filename: fn,
+                        title: fn.replace(/\.[a-zA-Z0-9]+$/, '') || btnText || 'Movie Video',
+                        resolution: 'HD'
+                      }
+                    }));
                   }
-                }, true);
+                }, false);
               } catch(e) {}
             })();
             true;
@@ -1162,7 +1175,7 @@ export default function App() {
               return true;
             }
 
-            // Catch media stream or video download requests: never navigate WebView to raw mp4
+            // Catch media stream or video download requests: trigger download options
             if (
               url.includes('/api/v/stream/') ||
               url.includes('/api/proxy/stream') ||
@@ -1171,10 +1184,11 @@ export default function App() {
               const urlParts = url.split('?');
               const qs = urlParts[1] || '';
               const matchFn = qs.match(/filename=([^&]+)/);
-              const fn = matchFn ? decodeURIComponent(matchFn[1]) : 'Movie Media';
-              startOfflineDownload({
+              const fn = matchFn ? decodeURIComponent(matchFn[1]) : 'Movie Media.mp4';
+              setDownloadPromptPayload({
                 url,
-                title: fn.replace(/\.(mp4|mkv)$/i, ''),
+                filename: fn,
+                title: fn.replace(/\.(mp4|mkv|avi|mov|webm)$/i, ''),
                 resolution: 'HD',
               });
               return false;
@@ -1542,6 +1556,22 @@ export default function App() {
                           </TouchableOpacity>
 
                           <TouchableOpacity
+                            style={[styles.controlPillBtn, { borderColor: '#10b98140' }]}
+                            onPress={() => {
+                              if (item.url) {
+                                Linking.openURL(item.url).catch(() => {});
+                                showToast('Opening system download to phone...', 'info');
+                              }
+                            }}
+                            activeOpacity={0.8}
+                          >
+                            <Feather name="download" size={13} color="#10b981" />
+                            <Text style={[styles.controlPillText, { color: '#10b981' }]}>
+                              Phone
+                            </Text>
+                          </TouchableOpacity>
+
+                          <TouchableOpacity
                             style={[styles.controlPillBtn, { borderColor: '#ef444440' }]}
                             onPress={() => cancelDownload(item.id)}
                             activeOpacity={0.8}
@@ -1558,6 +1588,118 @@ export default function App() {
             )
           )}
         </SafeAreaView>
+      </Modal>
+
+      {/* Universal Download Options Action Sheet */}
+      <Modal
+        visible={!!downloadPromptPayload}
+        transparent={true}
+        animationType="fade"
+        onRequestClose={() => setDownloadPromptPayload(null)}
+      >
+        <TouchableOpacity
+          style={styles.promptOverlay}
+          activeOpacity={1}
+          onPress={() => setDownloadPromptPayload(null)}
+        >
+          <View style={styles.promptModalContainer}>
+            <View style={styles.promptModalHeader}>
+              <View style={styles.promptIconWrap}>
+                <Feather name="download-cloud" size={22} color="#10b981" />
+              </View>
+              <View style={{ flex: 1, marginLeft: 12 }}>
+                <Text style={styles.promptModalTitle} numberOfLines={1}>
+                  {downloadPromptPayload?.title || 'Download Video'}
+                </Text>
+                <Text style={styles.promptModalSubtitle}>
+                  {downloadPromptPayload?.resolution || 'HD'} • {downloadPromptPayload?.size || 'MP4 Video'}
+                </Text>
+              </View>
+              <TouchableOpacity
+                onPress={() => setDownloadPromptPayload(null)}
+                style={styles.promptCloseBtn}
+              >
+                <Feather name="x" size={18} color="#94a3b8" />
+              </TouchableOpacity>
+            </View>
+
+            <View style={styles.promptOptionsList}>
+              {/* Option 1: Direct System Download (Phone Storage) */}
+              <TouchableOpacity
+                style={styles.promptOptionCard}
+                onPress={() => {
+                  const p = downloadPromptPayload;
+                  setDownloadPromptPayload(null);
+                  if (p && p.url) {
+                    Linking.openURL(p.url).catch(() => {});
+                    showToast('Starting system download to phone storage...', 'success');
+                  }
+                }}
+                activeOpacity={0.8}
+              >
+                <View style={[styles.promptOptionIconWrap, { backgroundColor: '#10b98120' }]}>
+                  <Feather name="download" size={20} color="#10b981" />
+                </View>
+                <View style={{ flex: 1, marginLeft: 12 }}>
+                  <Text style={styles.promptOptionTitle}>Download to Phone Storage</Text>
+                  <Text style={styles.promptOptionDesc}>
+                    Save directly to device Downloads folder. Runs in background with system notification.
+                  </Text>
+                </View>
+                <Feather name="chevron-right" size={18} color="#64748b" />
+              </TouchableOpacity>
+
+              {/* Option 2: Save for In-App Offline Watching */}
+              <TouchableOpacity
+                style={styles.promptOptionCard}
+                onPress={() => {
+                  const p = downloadPromptPayload;
+                  setDownloadPromptPayload(null);
+                  if (p) {
+                    startOfflineDownload(p);
+                  }
+                }}
+                activeOpacity={0.8}
+              >
+                <View style={[styles.promptOptionIconWrap, { backgroundColor: '#38bdf820' }]}>
+                  <Feather name="smartphone" size={20} color="#38bdf8" />
+                </View>
+                <View style={{ flex: 1, marginLeft: 12 }}>
+                  <Text style={styles.promptOptionTitle}>Save for Offline Watching in App</Text>
+                  <Text style={styles.promptOptionDesc}>
+                    Save inside Cinama App offline player. Watch anytime without internet.
+                  </Text>
+                </View>
+                <Feather name="chevron-right" size={18} color="#64748b" />
+              </TouchableOpacity>
+
+              {/* Option 3: Copy Direct Link */}
+              <TouchableOpacity
+                style={styles.promptOptionCard}
+                onPress={() => {
+                  const p = downloadPromptPayload;
+                  setDownloadPromptPayload(null);
+                  if (p && p.url) {
+                    showToast('Opening in browser...', 'info');
+                    Linking.openURL(p.url).catch(() => {});
+                  }
+                }}
+                activeOpacity={0.8}
+              >
+                <View style={[styles.promptOptionIconWrap, { backgroundColor: '#eab30820' }]}>
+                  <Feather name="external-link" size={20} color="#eab308" />
+                </View>
+                <View style={{ flex: 1, marginLeft: 12 }}>
+                  <Text style={styles.promptOptionTitle}>Open in External Downloader / Browser</Text>
+                  <Text style={styles.promptOptionDesc}>
+                    Use ADM, 1DM, IDM, or Chrome to accelerate download.
+                  </Text>
+                </View>
+                <Feather name="chevron-right" size={18} color="#64748b" />
+              </TouchableOpacity>
+            </View>
+          </View>
+        </TouchableOpacity>
       </Modal>
     </SafeAreaView>
   );
@@ -2112,5 +2254,80 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     lineHeight: 18,
     maxWidth: 260,
+  },
+
+  /* Download Options Action Sheet */
+  promptOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.75)',
+    justifyContent: 'flex-end',
+  },
+  promptModalContainer: {
+    backgroundColor: '#0d131f',
+    borderTopLeftRadius: 20,
+    borderTopRightRadius: 20,
+    borderTopWidth: 1,
+    borderColor: '#1e293b',
+    padding: 20,
+    paddingBottom: Platform.OS === 'ios' ? 36 : 24,
+  },
+  promptModalHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 16,
+    paddingBottom: 14,
+    borderBottomWidth: 1,
+    borderBottomColor: '#1e293b',
+  },
+  promptIconWrap: {
+    width: 44,
+    height: 44,
+    borderRadius: 12,
+    backgroundColor: '#10b98115',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  promptModalTitle: {
+    color: '#f8fafc',
+    fontSize: 16,
+    fontWeight: '700',
+  },
+  promptModalSubtitle: {
+    color: '#94a3b8',
+    fontSize: 12,
+    marginTop: 2,
+  },
+  promptCloseBtn: {
+    padding: 8,
+  },
+  promptOptionsList: {
+    gap: 12,
+  },
+  promptOptionCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#131b2e',
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: '#1e293b',
+    padding: 14,
+  },
+  promptOptionIconWrap: {
+    width: 40,
+    height: 40,
+    borderRadius: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  promptOptionTitle: {
+    color: '#f8fafc',
+    fontSize: 14,
+    fontWeight: '700',
+    marginBottom: 2,
+  },
+  promptOptionDesc: {
+    color: '#64748b',
+    fontSize: 11,
+    lineHeight: 15,
   },
 });
