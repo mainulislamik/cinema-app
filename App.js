@@ -132,6 +132,10 @@ export default function App() {
   const downloadResumableRef = useRef(null);
   const activeTasksRef = useRef({});
   const resumeDataRef = useRef({});
+  const userPausedIdsRef = useRef(new Set());
+  const autoRetryTimersRef = useRef({});
+  const resumeDownloadRef = useRef(null);
+  const autoResumeDownloadsRef = useRef(null);
   const hasInitialLoadedRef = useRef(false);
   const lastBackPressRef = useRef(0);
 
@@ -520,6 +524,10 @@ export default function App() {
         if (!isUpdatingRef.current) {
           checkForUpdates(false);
         }
+        // Auto-resume any downloads interrupted when screen locked or app was minimized
+        if (autoResumeDownloadsRef.current) {
+          autoResumeDownloadsRef.current();
+        }
         if (Platform.OS === 'android') {
           if (Platform.Version >= 33) {
             PermissionsAndroid.check(PermissionsAndroid.PERMISSIONS.POST_NOTIFICATIONS)
@@ -746,6 +754,11 @@ export default function App() {
     }
 
     const id = payload.id || `dl_${Date.now()}`;
+    userPausedIdsRef.current.delete(id);
+    if (autoRetryTimersRef.current[id]) {
+      clearTimeout(autoRetryTimersRef.current[id]);
+      delete autoRetryTimersRef.current[id];
+    }
     const safeTitle = (payload.title || 'media')
       .replace(/[^a-zA-Z0-9_\-]/g, '_')
       .replace(/_+/g, '_')
@@ -877,10 +890,7 @@ export default function App() {
         activeTasksRef.current[id] = downloadResumable;
         result = await downloadResumable.downloadAsync();
       } catch (resumableErr) {
-        console.warn('createDownloadResumable with resumeData failed, restarting cleanly:', resumableErr);
-        try {
-          await FileSystem.deleteAsync(fileUri, { idempotent: true });
-        } catch (_) {}
+        console.warn('createDownloadResumable with resumeData failed, attempting fresh resumption:', resumableErr);
         try {
           const freshResumable = FileSystem.createDownloadResumable(
             downloadUrl,
@@ -944,20 +954,62 @@ export default function App() {
       }
     } catch (err) {
       delete activeTasksRef.current[id];
-      delete resumeDataRef.current[id];
-      console.warn(`Download error for ${id}:`, err);
+      console.warn(`Download paused/interrupted for ${id}:`, err);
+
+      // If user paused or cancelled manually, do not auto-resume
+      if (userPausedIdsRef.current.has(id)) {
+        return;
+      }
+
+      // Check how many bytes have been saved on disk so far
+      let partialBytes = 0;
+      try {
+        const fileInfo = await FileSystem.getInfoAsync(fileUri);
+        if (fileInfo.exists && fileInfo.size) {
+          partialBytes = fileInfo.size;
+        }
+      } catch (_) {}
+
+      // Keep task alive in downloads list with auto-reconnecting status
       setDownloads((prevList) => {
-        const errList = prevList.map((item) =>
-          item.id === id ? { ...item, status: 'error', speedText: 'Failed' } : item
-        );
-        AsyncStorage.setItem(OFFLINE_DOWNLOADS_KEY, JSON.stringify(errList)).catch(() => {});
-        return errList;
+        const updated = prevList.map((item) => {
+          if (item.id === id) {
+            const currentBytes = Math.max(item.downloadedBytes || 0, partialBytes);
+            const total = item.totalBytes || expectedTotal;
+            const progress = total > 0 ? Math.min(1, currentBytes / total) : item.progress;
+            return {
+              ...item,
+              status: 'downloading',
+              downloadedBytes: currentBytes,
+              progress,
+              speedText: 'Auto-resuming in background...',
+            };
+          }
+          return item;
+        });
+        AsyncStorage.setItem(OFFLINE_DOWNLOADS_KEY, JSON.stringify(updated)).catch(() => {});
+        return updated;
       });
-      showToast(`Download failed: ${err.message || payload.title}`, 'error');
+
+      // Schedule auto-retry so locking the phone or temporary socket drops never stop the download
+      if (autoRetryTimersRef.current[id]) {
+        clearTimeout(autoRetryTimersRef.current[id]);
+      }
+      autoRetryTimersRef.current[id] = setTimeout(() => {
+        if (!userPausedIdsRef.current.has(id) && resumeDownloadRef.current) {
+          console.log(`[CinemaVault] Auto-retrying download ${id} after background drop...`);
+          resumeDownloadRef.current(id);
+        }
+      }, 3500);
     }
   }, [showToast, refreshStorageInfo]);
 
   const pauseDownload = useCallback(async (id) => {
+    userPausedIdsRef.current.add(id);
+    if (autoRetryTimersRef.current[id]) {
+      clearTimeout(autoRetryTimersRef.current[id]);
+      delete autoRetryTimersRef.current[id];
+    }
     let savedResumeData = null;
     const task = activeTasksRef.current[id];
     if (task) {
@@ -989,6 +1041,11 @@ export default function App() {
   }, []);
 
   const resumeDownload = useCallback(async (id) => {
+    userPausedIdsRef.current.delete(id);
+    if (autoRetryTimersRef.current[id]) {
+      clearTimeout(autoRetryTimersRef.current[id]);
+      delete autoRetryTimersRef.current[id];
+    }
     let item = downloadsRef.current.find((d) => d.id === id);
     if (!item) {
       item = downloads.find((d) => d.id === id);
@@ -1026,9 +1083,31 @@ export default function App() {
       url: resolvedUrl,
       resumeData: item.resumeData || resumeDataRef.current[id] || null,
     });
-  }, [startOfflineDownload, resolveAbsoluteDownloadUrl]);
+  }, [startOfflineDownload, resolveAbsoluteDownloadUrl, downloads]);
+
+  resumeDownloadRef.current = resumeDownload;
+
+  useEffect(() => {
+    autoResumeDownloadsRef.current = () => {
+      downloadsRef.current.forEach((item) => {
+        if (
+          item.status === 'downloading' &&
+          !activeTasksRef.current[item.id] &&
+          !userPausedIdsRef.current.has(item.id)
+        ) {
+          console.log(`[CinemaVault] Auto-resuming ${item.title} on app foreground...`);
+          resumeDownload(item.id);
+        }
+      });
+    };
+  }, [resumeDownload]);
 
   const cancelDownload = useCallback(async (id) => {
+    userPausedIdsRef.current.add(id);
+    if (autoRetryTimersRef.current[id]) {
+      clearTimeout(autoRetryTimersRef.current[id]);
+      delete autoRetryTimersRef.current[id];
+    }
     const task = activeTasksRef.current[id];
     if (task) {
       try {
@@ -1050,6 +1129,28 @@ export default function App() {
     });
     showToast('Download cancelled', 'info');
   }, [downloads, showToast, refreshStorageInfo]);
+
+  const openBatteryOptimizationSettings = useCallback(async () => {
+    if (Platform.OS === 'android') {
+      try {
+        await IntentLauncher.startActivityAsync('android.settings.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS', {
+          data: 'package:com.imon.cinema',
+        });
+      } catch (_) {
+        try {
+          await IntentLauncher.startActivityAsync('android.settings.IGNORE_BATTERY_OPTIMIZATION_SETTINGS');
+        } catch (err) {
+          try {
+            await Linking.openSettings();
+          } catch (_) {
+            showToast('Settings > Apps > Cinama > Battery > Unrestricted', 'info');
+          }
+        }
+      }
+    } else {
+      Linking.openSettings().catch(() => {});
+    }
+  }, [showToast]);
 
   const deleteDownload = useCallback((id) => {
     const item = downloads.find((d) => d.id === id);
@@ -1631,6 +1732,27 @@ export default function App() {
                 data={downloadingList}
                 keyExtractor={(item) => item.id}
                 contentContainerStyle={styles.listContent}
+                ListHeaderComponent={
+                  <View style={styles.bgDownloadBanner}>
+                    <View style={{ flex: 1, marginRight: 8 }}>
+                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 5, marginBottom: 2 }}>
+                        <Feather name="shield" size={12} color="#38bdf8" />
+                        <Text style={styles.bgDownloadBannerTitle}>Keep Downloading When Locked</Text>
+                      </View>
+                      <Text style={styles.bgDownloadBannerDesc}>
+                        Tap Allow for background downloads, or use the green Phone button for Android System Downloader.
+                      </Text>
+                    </View>
+                    <TouchableOpacity
+                      style={styles.bgSettingsBtn}
+                      onPress={openBatteryOptimizationSettings}
+                      activeOpacity={0.8}
+                    >
+                      <Feather name="settings" size={11} color="#38bdf8" />
+                      <Text style={styles.bgSettingsBtnText}>Allow</Text>
+                    </TouchableOpacity>
+                  </View>
+                }
                 renderItem={({ item }) => {
                   const percent = Math.round((item.progress || 0) * 100);
                   const isPaused = item.status === 'paused';
@@ -2281,6 +2403,45 @@ const styles = StyleSheet.create({
     backgroundColor: '#0f172a',
     borderWidth: 1,
     borderColor: '#1e293b',
+  },
+  bgDownloadBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: 'rgba(56, 189, 248, 0.08)',
+    borderColor: 'rgba(56, 189, 248, 0.25)',
+    borderWidth: 1,
+    borderRadius: 10,
+    marginBottom: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+  },
+  bgDownloadBannerTitle: {
+    color: '#38bdf8',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  bgDownloadBannerDesc: {
+    color: '#94a3b8',
+    fontSize: 10.5,
+    lineHeight: 14,
+    marginTop: 2,
+  },
+  bgSettingsBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    backgroundColor: 'rgba(56, 189, 248, 0.15)',
+    borderColor: 'rgba(56, 189, 248, 0.4)',
+    borderWidth: 1,
+    borderRadius: 8,
+    paddingHorizontal: 9,
+    paddingVertical: 6,
+  },
+  bgSettingsBtnText: {
+    color: '#38bdf8',
+    fontSize: 11,
+    fontWeight: '700',
   },
   storageInfoRow: {
     flexDirection: 'row',
