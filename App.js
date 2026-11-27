@@ -36,7 +36,11 @@ const STORAGE_KEY = '@cinema_server_url';
 const DEFAULT_SERVER_URL = 'https://cinama.xyz';
 const CURRENT_APP_VERSION = '1.1.0';
 const OFFLINE_DOWNLOADS_KEY = '@cinema_offline_downloads_v1';
-const DOWNLOADS_DIR = `${FileSystem.documentDirectory}downloads/`;
+const getDownloadsDir = () => {
+  const base = FileSystem.documentDirectory || FileSystem.cacheDirectory || '';
+  const cleanBase = base ? (base.endsWith('/') ? base : `${base}/`) : '';
+  return `${cleanBase}downloads/`;
+};
 const NOTIF_ASKED_KEY = '@cinema_notif_asked';
 
 const isNewerVersion = (remoteVer, currentVer) => {
@@ -551,12 +555,16 @@ export default function App() {
   // Ensure downloads directory exists
   const ensureDownloadsDirectory = async () => {
     try {
-      const dirInfo = await FileSystem.getInfoAsync(DOWNLOADS_DIR);
+      const dir = getDownloadsDir();
+      if (!dir) return null;
+      const dirInfo = await FileSystem.getInfoAsync(dir);
       if (!dirInfo.exists) {
-        await FileSystem.makeDirectoryAsync(DOWNLOADS_DIR, { intermediates: true });
+        await FileSystem.makeDirectoryAsync(dir, { intermediates: true });
       }
+      return dir;
     } catch (e) {
       console.warn('Error creating downloads directory:', e);
+      return getDownloadsDir();
     }
   };
 
@@ -605,8 +613,17 @@ export default function App() {
         const stored = await AsyncStorage.getItem(OFFLINE_DOWNLOADS_KEY);
         if (stored) {
           const parsed = JSON.parse(stored);
-          setDownloads(parsed);
-          refreshStorageInfo(parsed);
+          // If app was terminated while downloading, reset stuck 'downloading' states to 'paused'
+          const sanitized = Array.isArray(parsed)
+            ? parsed.map((item) => {
+                if (item.status === 'downloading') {
+                  return { ...item, status: 'paused', speedText: 'Paused' };
+                }
+                return item;
+              })
+            : [];
+          setDownloads(sanitized);
+          refreshStorageInfo(sanitized);
         }
       } catch (err) {
         console.warn('Failed to load offline downloads:', err);
@@ -622,20 +639,20 @@ export default function App() {
       return;
     }
 
-    await ensureDownloadsDirectory();
+    const targetDir = await ensureDownloadsDirectory();
 
     // Defensively resolve relative URLs (e.g. /api/v/stream/...) to absolute HTTP/HTTPS
     let downloadUrl = payload.url;
     if (typeof downloadUrl === 'string' && (downloadUrl.startsWith('/') || !downloadUrl.startsWith('http'))) {
-      const base = (serverUrl || DEFAULT_SERVER_URL).replace(/\/+$/, '');
-      downloadUrl = `${base}${downloadUrl.startsWith('/') ? '' : '/'}${downloadUrl}`;
+      const base = DEFAULT_SERVER_URL.replace(/\/+$/, '');
+      downloadUrl = `${base}${downloadUrl.startsWith('/') ? '' : '/'}${downloadUrl.replace(/^\/+/, '')}`;
     }
 
     const id = payload.id || `dl_${Date.now()}`;
     const safeTitle = (payload.title || 'media').replace(/[^a-zA-Z0-9_\-\.]/g, '_').substring(0, 40);
-    const fileUri = payload.fileUri || `${DOWNLOADS_DIR}${safeTitle}_${payload.resolution || 'HD'}_${Date.now()}.mp4`;
+    const fileUri = payload.fileUri || `${targetDir}${safeTitle}_${payload.resolution || 'HD'}_${Date.now()}.mp4`;
 
-    const expectedTotal = payload.totalBytes || payload.size_bytes || 0;
+    const expectedTotal = Number(payload.totalBytes || payload.size_bytes) || 0;
 
     const newItem = {
       id,
@@ -644,7 +661,7 @@ export default function App() {
       poster: payload.poster || null,
       url: downloadUrl,
       resolution: payload.resolution || 'HD',
-      sizeText: payload.size || 'HD',
+      sizeText: payload.size || (expectedTotal > 0 ? `${(expectedTotal / (1024 * 1024)).toFixed(0)} MB` : 'HD'),
       fileUri,
       progress: payload.progress || 0,
       downloadedBytes: payload.downloadedBytes || 0,
@@ -673,7 +690,7 @@ export default function App() {
 
       const now = Date.now();
       const timeDiff = (now - lastTime) / 1000;
-      if (timeDiff >= 0.5 || writtenBytes === totalBytes) {
+      if (timeDiff >= 0.5 || writtenBytes === totalBytes || (writtenBytes > 0 && lastBytes === 0)) {
         const bytesDiff = writtenBytes - lastBytes;
         const speedBps = timeDiff > 0 ? bytesDiff / timeDiff : 0;
         let speedStr = '';
@@ -681,8 +698,10 @@ export default function App() {
           speedStr = `${(speedBps / (1024 * 1024)).toFixed(1)} MB/s`;
         } else if (speedBps > 1024) {
           speedStr = `${(speedBps / 1024).toFixed(0)} KB/s`;
-        } else {
+        } else if (speedBps > 0) {
           speedStr = `${Math.round(speedBps)} B/s`;
+        } else {
+          speedStr = 'Downloading...';
         }
 
         lastBytes = writtenBytes;
@@ -706,12 +725,20 @@ export default function App() {
     };
 
     try {
+      if (activeTasksRef.current[id]) {
+        try {
+          await activeTasksRef.current[id].pauseAsync();
+        } catch (e) {}
+        delete activeTasksRef.current[id];
+      }
+
       const downloadResumable = FileSystem.createDownloadResumable(
         downloadUrl,
         fileUri,
         {
           headers: {
             'User-Agent': 'CinamaApp/1.0.5',
+            'Accept': '*/*',
           },
         },
         callback
@@ -722,7 +749,11 @@ export default function App() {
       delete activeTasksRef.current[id];
 
       if (result && result.uri) {
-        const info = await FileSystem.getInfoAsync(result.uri);
+        let finalSize = 0;
+        try {
+          const info = await FileSystem.getInfoAsync(result.uri);
+          finalSize = info.size || 0;
+        } catch (e) {}
         setDownloads((prevList) => {
           const finalDownloads = prevList.map((item) => {
             if (item.id === id) {
@@ -730,7 +761,7 @@ export default function App() {
                 ...item,
                 status: 'completed',
                 progress: 1,
-                fileSize: info.size || 0,
+                fileSize: finalSize || item.totalBytes || 0,
                 speedText: '',
               };
             }
@@ -747,7 +778,7 @@ export default function App() {
       console.warn(`Download error for ${id}:`, err);
       setDownloads((prevList) => {
         const errList = prevList.map((item) =>
-          item.id === id ? { ...item, status: 'error', speedText: 'Error' } : item
+          item.id === id ? { ...item, status: 'error', speedText: 'Failed' } : item
         );
         AsyncStorage.setItem(OFFLINE_DOWNLOADS_KEY, JSON.stringify(errList)).catch(() => {});
         return errList;
@@ -884,7 +915,7 @@ export default function App() {
   const handleHttpError = (syntheticEvent) => {
     const { statusCode, url } = syntheticEvent.nativeEvent;
     // Sub-resources like 404 images, posters, favicon, subtitle files should NOT crash the app
-    const isMainDoc = !url || url === serverUrl || url === `${serverUrl}/` || url.startsWith(`${serverUrl}/?`) || url.startsWith(`${serverUrl}/#`);
+    const isMainDoc = !url || url === DEFAULT_SERVER_URL || url === `${DEFAULT_SERVER_URL}/` || url.startsWith(`${DEFAULT_SERVER_URL}/?`) || url.startsWith(`${DEFAULT_SERVER_URL}/#`);
     if (statusCode >= 400 && isMainDoc) {
       console.warn('WebView Main Document HTTP error:', statusCode, url);
       setHasError(true);
@@ -963,7 +994,7 @@ export default function App() {
   }
 
   const completedList = downloads.filter((d) => d.status === 'completed');
-  const downloadingList = downloads.filter((d) => d.status === 'downloading' || d.status === 'paused');
+  const downloadingList = downloads.filter((d) => d.status === 'downloading' || d.status === 'paused' || d.status === 'error');
   const completedDownloadsCount = completedList.length;
 
   return (
@@ -1356,6 +1387,18 @@ export default function App() {
                 renderItem={({ item }) => {
                   const percent = Math.round((item.progress || 0) * 100);
                   const isPaused = item.status === 'paused';
+                  const isError = item.status === 'error';
+
+                  const downloadedMb = item.downloadedBytes > 0 ? (item.downloadedBytes / (1024 * 1024)).toFixed(1) : null;
+                  const totalMb = item.totalBytes > 0 ? (item.totalBytes / (1024 * 1024)).toFixed(0) : null;
+                  const progressLabel = totalMb && downloadedMb
+                    ? `${percent}% • ${downloadedMb} MB / ${totalMb} MB`
+                    : downloadedMb
+                    ? `${downloadedMb} MB downloaded`
+                    : `${percent}%`;
+
+                  let statusText = isPaused ? 'Paused' : isError ? 'Failed' : item.speedText || 'Downloading...';
+
                   return (
                     <View style={styles.dlCard}>
                       <View style={styles.dlCardInfo}>
@@ -1375,27 +1418,34 @@ export default function App() {
                               styles.progressBarFill,
                               { width: `${Math.max(2, Math.min(100, percent))}%` },
                               isPaused && { backgroundColor: '#eab308' },
+                              isError && { backgroundColor: '#ef4444' },
                             ]}
                           />
                         </View>
 
                         {/* Progress Meta */}
                         <View style={styles.progressMetaRow}>
-                          <Text style={styles.progressPercentText}>{percent}%</Text>
-                          <Text style={styles.progressSpeedText}>
-                            {isPaused ? 'Paused' : item.speedText || 'Downloading...'}
+                          <Text style={styles.progressPercentText}>{progressLabel}</Text>
+                          <Text style={[styles.progressSpeedText, isError && { color: '#ef4444' }]}>
+                            {statusText}
                           </Text>
                         </View>
 
                         {/* Controls */}
                         <View style={styles.dlControlsRow}>
                           <TouchableOpacity
-                            style={styles.controlPillBtn}
-                            onPress={() => (isPaused ? resumeDownload(item.id) : pauseDownload(item.id))}
+                            style={[styles.controlPillBtn, isError && { borderColor: '#ef444460' }]}
+                            onPress={() => (isPaused || isError ? resumeDownload(item.id) : pauseDownload(item.id))}
                             activeOpacity={0.8}
                           >
-                            <Feather name={isPaused ? 'play' : 'pause'} size={13} color="#38bdf8" />
-                            <Text style={styles.controlPillText}>{isPaused ? 'Resume' : 'Pause'}</Text>
+                            <Feather
+                              name={isPaused || isError ? 'play' : 'pause'}
+                              size={13}
+                              color={isError ? '#ef4444' : isPaused ? '#eab308' : '#38bdf8'}
+                            />
+                            <Text style={[styles.controlPillText, isError && { color: '#ef4444' }]}>
+                              {isPaused ? 'Resume' : isError ? 'Retry' : 'Pause'}
+                            </Text>
                           </TouchableOpacity>
 
                           <TouchableOpacity
