@@ -670,14 +670,8 @@ export default function App() {
       return;
     }
 
-    // Proactively request storage / media permission
-    try {
-      await requestStoragePermission();
-    } catch (permErr) {
-      console.warn('Storage permission check failed:', permErr);
-    }
-
-    const targetDir = await ensureDownloadsDirectory();
+    const id = payload.id || `dl_${Date.now()}`;
+    const safeTitle = (payload.title || 'media').replace(/[^a-zA-Z0-9_\-\.]/g, '_').substring(0, 40);
 
     // Defensively resolve relative URLs (e.g. /api/v/stream/...) to absolute HTTP/HTTPS
     let downloadUrl = payload.url;
@@ -686,11 +680,12 @@ export default function App() {
       downloadUrl = `${base}${downloadUrl.startsWith('/') ? '' : '/'}${downloadUrl.replace(/^\/+/, '')}`;
     }
 
-    const id = payload.id || `dl_${Date.now()}`;
-    const safeTitle = (payload.title || 'media').replace(/[^a-zA-Z0-9_\-\.]/g, '_').substring(0, 40);
-    const fileUri = payload.fileUri || `${targetDir}${safeTitle}_${payload.resolution || 'HD'}_${Date.now()}.mp4`;
-
     const expectedTotal = Number(payload.totalBytes || payload.size_bytes) || 0;
+
+    const baseDir = FileSystem.documentDirectory || FileSystem.cacheDirectory || '';
+    const cleanBase = baseDir.endsWith('/') ? baseDir : `${baseDir}/`;
+    const targetDir = `${cleanBase}downloads/`;
+    const fileUri = payload.fileUri || `${targetDir}${safeTitle}_${payload.resolution || 'HD'}_${Date.now()}.mp4`;
 
     const newItem = {
       id,
@@ -709,17 +704,24 @@ export default function App() {
       createdAt: payload.createdAt || Date.now(),
     };
 
+    // 1. Instant UI feedback: show modal & toast immediately
     setDownloads((prev) => {
       const updated = [newItem, ...prev.filter((d) => d.id !== id)];
       AsyncStorage.setItem(OFFLINE_DOWNLOADS_KEY, JSON.stringify(updated)).catch(() => {});
       return updated;
     });
 
-    // Automatically open Downloads modal so user sees immediate progress
     setIsDownloadsModalVisible(true);
     setDownloadsTab('downloading');
-
     showToast(`Downloading: ${payload.title} (${payload.resolution || 'HD'})`, 'success');
+
+    // 2. Ensure downloads dir exists in background
+    try {
+      await ensureDownloadsDirectory();
+    } catch (_) {}
+
+    // 3. Storage permission check non-blocking in background
+    requestStoragePermission().catch(() => {});
 
     let lastBytes = 0;
     let lastTime = Date.now();
@@ -1108,10 +1110,12 @@ export default function App() {
 
                 // Global capture-phase download interceptor: NEVER let clicks redirect to browser
                 document.addEventListener('click', function(e) {
-                  var target = e.target && e.target.closest ? e.target.closest('a') : null;
+                  var target = e.target && e.target.closest ? e.target.closest('a, button') : null;
                   if (!target) return;
                   var href = target.getAttribute('href') || '';
-                  var isDownload = target.hasAttribute('download') || href.includes('/downloads/') || /\\.(mp4|mkv|avi|mov|webm)(\\?.*)?$/i.test(href);
+                  var btnText = (target.innerText || target.textContent || '').trim();
+                  var isDlButton = btnText.toLowerCase().includes('download') && !btnText.toLowerCase().includes('app');
+                  var isDownload = target.hasAttribute('download') || href.includes('/downloads/') || href.includes('/api/v/stream/') || /\.(mp4|mkv|avi|mov|webm)(\?.*)?$/i.test(href);
                   if (isDownload) {
                     e.preventDefault();
                     e.stopPropagation();
@@ -1120,7 +1124,7 @@ export default function App() {
                         type: 'START_OFFLINE_DOWNLOAD',
                         payload: {
                           url: target.href || href,
-                          title: target.getAttribute('download') || target.innerText || 'Movie Media',
+                          title: target.getAttribute('download') || btnText || 'Movie Media',
                           resolution: 'HD'
                         }
                       }));
@@ -1153,9 +1157,27 @@ export default function App() {
               return false;
             }
 
-            // Direct file download links triggered via browser navigation
+            // Direct file download links triggered via browser navigation (APKs)
             if (url.includes('/downloads/') && url.endsWith('.apk')) {
               return true;
+            }
+
+            // Catch media stream or video download requests: never navigate WebView to raw mp4
+            if (
+              url.includes('/api/v/stream/') ||
+              url.includes('/api/proxy/stream') ||
+              /\.(mp4|mkv|avi|mov|webm)(\?.*)?$/i.test(url)
+            ) {
+              const urlParts = url.split('?');
+              const qs = urlParts[1] || '';
+              const matchFn = qs.match(/filename=([^&]+)/);
+              const fn = matchFn ? decodeURIComponent(matchFn[1]) : 'Movie Media';
+              startOfflineDownload({
+                url,
+                title: fn.replace(/\.(mp4|mkv)$/i, ''),
+                resolution: 'HD',
+              });
+              return false;
             }
 
             // Allow all http and https requests (covers app server, CDNs, BDIX mirrors, embeds, streams)
