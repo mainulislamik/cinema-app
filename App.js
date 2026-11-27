@@ -649,7 +649,7 @@ export default function App() {
   const refreshStorageInfo = useCallback(async (currentDownloads) => {
     try {
       let usedBytes = 0;
-      const list = currentDownloads || downloads;
+      const list = currentDownloads || downloadsRef.current || [];
       for (const item of list) {
         if (item.status === 'completed' && item.fileSize) {
           usedBytes += item.fileSize;
@@ -669,7 +669,7 @@ export default function App() {
     } catch (err) {
       console.warn('Storage calculation error:', err);
     }
-  }, [downloads]);
+  }, []);
 
   // Save downloads array to AsyncStorage
   const saveDownloads = useCallback(async (newDownloads) => {
@@ -696,13 +696,14 @@ export default function App() {
     return target;
   }, []);
 
-  // Load offline downloads on mount
+  // Load offline downloads on mount - run ONLY ONCE on app launch
   useEffect(() => {
+    let isMounted = true;
     const initDownloads = async () => {
       try {
         await ensureDownloadsDirectory();
         const stored = await AsyncStorage.getItem(OFFLINE_DOWNLOADS_KEY);
-        if (stored) {
+        if (stored && isMounted) {
           const parsed = JSON.parse(stored);
           // If app was terminated while downloading, reset stuck 'downloading' states to 'paused'
           // And automatically heal any relative URLs or corrupt filenames
@@ -732,7 +733,10 @@ export default function App() {
       }
     };
     initDownloads();
-  }, [refreshStorageInfo, resolveAbsoluteDownloadUrl]);
+    return () => {
+      isMounted = false;
+    };
+  }, []);
 
   // Start offline download with resumable progress tracking
   const startOfflineDownload = useCallback(async (payload) => {
@@ -1007,20 +1011,22 @@ export default function App() {
     const safeFn = `${safeTitle}_${item.resolution || 'HD'}.mbx`;
     const resolvedUrl = resolveAbsoluteDownloadUrl(item.url, `${safeTitle}_${item.resolution || 'HD'}.mp4`);
 
-    setDownloads((prev) =>
-      prev.map((d) =>
+    setDownloads((prev) => {
+      const updated = prev.map((d) =>
         d.id === id
           ? { ...d, status: 'downloading', speedText: 'Connecting...', url: resolvedUrl }
           : d
-      )
-    );
+      );
+      AsyncStorage.setItem(OFFLINE_DOWNLOADS_KEY, JSON.stringify(updated)).catch(() => {});
+      return updated;
+    });
 
     startOfflineDownload({
       ...item,
       url: resolvedUrl,
       resumeData: item.resumeData || resumeDataRef.current[id] || null,
     });
-  }, [downloads, startOfflineDownload, resolveAbsoluteDownloadUrl]);
+  }, [startOfflineDownload, resolveAbsoluteDownloadUrl]);
 
   const cancelDownload = useCallback(async (id) => {
     const task = activeTasksRef.current[id];
@@ -2239,6 +2245,7 @@ const styles = StyleSheet.create({
   dlModalContainer: {
     flex: 1,
     backgroundColor: '#070a13',
+    paddingTop: Platform.OS === 'android' ? (StatusBar.currentHeight || 28) + 6 : 0,
   },
   dlHeader: {
     flexDirection: 'row',
@@ -2585,6 +2592,7 @@ const styles = StyleSheet.create({
   offlinePlayerScreen: {
     flex: 1,
     backgroundColor: '#000000',
+    paddingTop: Platform.OS === 'android' ? (StatusBar.currentHeight || 28) : 0,
   },
   offlinePlayerTopBar: {
     height: 52,
