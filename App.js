@@ -29,6 +29,7 @@ import * as ScreenOrientation from 'expo-screen-orientation';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as IntentLauncher from 'expo-intent-launcher';
 import * as Updates from 'expo-updates';
+import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake';
 import { getOfflinePlayerHtml } from './offlinePlayerHtml';
 
 const { width } = Dimensions.get('window');
@@ -124,6 +125,11 @@ export default function App() {
   const [downloadsTab, setDownloadsTab] = useState('completed'); // 'completed' | 'downloading'
   const [storageInfo, setStorageInfo] = useState({ usedMB: '0.0', freeGB: '0.0' });
   const [toastInfo, setToastInfo] = useState(null);
+  const [isMediaPlaying, setIsMediaPlaying] = useState(false);
+  const isMediaPlayingRef = useRef(false);
+  useEffect(() => {
+    isMediaPlayingRef.current = isMediaPlaying;
+  }, [isMediaPlaying]);
   const [offlinePlayingItem, setOfflinePlayingItem] = useState(null);
   const offlinePlayingItemRef = useRef(null);
   const closeOfflinePlayerRef = useRef(null);
@@ -532,7 +538,13 @@ export default function App() {
   // Check for updates, notification permission, and handle app foreground/background lifecycle
   useEffect(() => {
     const subscription = AppState.addEventListener('change', async (nextAppState) => {
-      if (nextAppState === 'active') {
+      if (nextAppState !== 'active') {
+        deactivateKeepAwake('cinema-playback').catch(() => {});
+        deactivateKeepAwake('cinema-offline').catch(() => {});
+      } else if (nextAppState === 'active') {
+        if (isMediaPlaying || isMediaPlayingRef.current) {
+          activateKeepAwakeAsync('cinema-playback').catch(() => {});
+        }
         if (!isUpdatingRef.current) {
           checkForUpdates(false);
         }
@@ -549,13 +561,10 @@ export default function App() {
             sendNotificationStatusToWeb(true);
           }
         }
-      } else if (nextAppState === 'background' || nextAppState === 'inactive') {
-        // App minimized or screen locked: Keep active downloads running uninterrupted in the background.
-        // User explicitly controls downloads via in-app Pause/Resume buttons.
       }
     });
     return () => subscription.remove();
-  }, [checkForUpdates, sendNotificationStatusToWeb]);
+  }, [checkForUpdates, sendNotificationStatusToWeb, isMediaPlaying]);
 
   // Hardware back button support with double-tap exit
   useEffect(() => {
@@ -1252,6 +1261,7 @@ export default function App() {
   }, []);
 
   const closeOfflinePlayer = useCallback(async () => {
+    deactivateKeepAwake('cinema-offline').catch(() => {});
     setOfflinePlayingItem(null);
     try {
       await ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP);
@@ -1285,6 +1295,12 @@ export default function App() {
         closeOfflinePlayer();
       } else if (msg && msg.type === 'TOGGLE_ORIENTATION') {
         toggleOfflineOrientation();
+      } else if (msg && msg.type === 'OFFLINE_PLAYBACK_STATE') {
+        if (msg.isPlaying) {
+          activateKeepAwakeAsync('cinema-offline').catch(() => {});
+        } else {
+          deactivateKeepAwake('cinema-offline').catch(() => {});
+        }
       }
     } catch (err) {
       console.warn('Offline player message error:', err);
@@ -1306,6 +1322,7 @@ export default function App() {
       try {
         await ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.LANDSCAPE);
       } catch (_) {}
+      activateKeepAwakeAsync('cinema-offline').catch(() => {});
       setOfflinePlayingItem(item);
     } catch (err) {
       console.warn('Offline player error:', err);
@@ -1346,8 +1363,20 @@ export default function App() {
         } else if (msg.orientation === 'unlock') {
           ScreenOrientation.unlockAsync();
         }
+      } else if (msg && msg.type === 'MEDIA_PLAYBACK_STATE') {
+        const playing = Boolean(msg.isPlaying);
+        setIsMediaPlaying(playing);
+        if (playing) {
+          activateKeepAwakeAsync('cinema-playback').catch(() => {});
+        } else {
+          deactivateKeepAwake('cinema-playback').catch(() => {});
+        }
       } else if (msg && msg.type === 'MODAL_STATE') {
         isWebModalOpenRef.current = !!msg.isOpen;
+        if (msg.modal === 'player' && !msg.isOpen) {
+          setIsMediaPlaying(false);
+          deactivateKeepAwake('cinema-playback').catch(() => {});
+        }
       } else if (msg && (msg.type === 'START_OFFLINE_DOWNLOAD' || msg.type === 'DOWNLOAD_REQUEST')) {
         setDownloadPromptPayload(msg.payload);
       } else if (msg && msg.type === 'OPEN_DOWNLOADS') {
@@ -1419,6 +1448,7 @@ export default function App() {
           key={`cinema-wv-${sessionKey}`}
           source={{ uri: DEFAULT_SERVER_URL }}
           style={styles.webView}
+          keepScreenOn={isMediaPlaying}
           applicationNameForUserAgent="CinamaApp/1.0.5"
           setSupportMultipleWindows={false}
           injectedJavaScriptBeforeContentLoaded={`
@@ -1955,7 +1985,7 @@ export default function App() {
         onRequestClose={closeOfflinePlayer}
         statusBarTranslucent={true}
       >
-        <View style={styles.offlinePlayerScreen}>
+        <View style={styles.offlinePlayerScreen} keepScreenOn={Boolean(offlinePlayingItem)}>
           <StatusBar hidden={true} />
           {offlinePlayingItem?.fileUri ? (
             <WebView
@@ -1972,6 +2002,7 @@ export default function App() {
               domStorageEnabled={true}
               onMessage={handleOfflinePlayerMessage}
               style={{ flex: 1, backgroundColor: '#000000' }}
+              keepScreenOn={Boolean(offlinePlayingItem)}
             />
           ) : (
             <View style={styles.emptyContainer}>

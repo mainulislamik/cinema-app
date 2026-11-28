@@ -553,6 +553,18 @@ export function getOfflinePlayerHtml(item) {
         showControls();
       });
 
+      video.addEventListener('play', function() {
+        postRN({ type: 'OFFLINE_PLAYBACK_STATE', isPlaying: true });
+      });
+
+      video.addEventListener('pause', function() {
+        postRN({ type: 'OFFLINE_PLAYBACK_STATE', isPlaying: false });
+      });
+
+      video.addEventListener('ended', function() {
+        postRN({ type: 'OFFLINE_PLAYBACK_STATE', isPlaying: false });
+      });
+
       btnPlay.addEventListener('click', function(e) {
         e.stopPropagation();
         togglePlay();
